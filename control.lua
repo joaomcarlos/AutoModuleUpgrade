@@ -7,7 +7,7 @@ local UPS = 60 -- Game updates per second
 local SCAN_INTERVAL_SEC = 30 -- Seconds between scans
 local SCAN_INTERVAL = SCAN_INTERVAL_SEC * UPS -- Ticks between scans
 local MIN_PF_DIFF = 15 -- Minimum production rate in items per minute to be eligible for rate-priority queuing
-local QUEUE_SIZE_PER_PLANET = 10 -- Max buildings queued per surface per scan
+local QUEUE_SIZE_PER_PLANET = 100 -- Max buildings queued per surface per scan
 local MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rate-based priority
 local MOVE_CAMERA_AFTER_UPGRADE = false -- Center camera on building after applying module upgrades
 
@@ -32,7 +32,8 @@ end
 
 -- Helpers for tracking network reservations during a scan
 local function network_has_items(logistic_network, name, quality, count, reservations)
-  -- if not logistic_network then return false end
+  if not logistic_network then return false end
+  if not prototypes.item[name] then return false end
   local available = logistic_network.get_item_count({name = name, quality = quality})
   if available < count then return false end
   if not reservations then return true end
@@ -42,8 +43,18 @@ local function network_has_items(logistic_network, name, quality, count, reserva
 end
 
 local function reserve_items(reservations, name, quality, count)
+  if not reservations then return end
   local key = name .. ":" .. quality
   reservations[key] = (reservations[key] or 0) + count
+end
+
+local function reserve_module_plan_items(reservations, modules_plan)
+  if not reservations or not modules_plan then return end
+  for _, request in ipairs(modules_plan) do
+    if request.id and request.id.name then
+      reserve_items(reservations, request.id.name, request.id.quality or "normal", 1)
+    end
+  end
 end
 
 -- Power-score-based search for quality modules
@@ -433,9 +444,13 @@ end
 
 -- Attempt to defer a building for quality upgrade; returns true if deferred
 -- Uses order_upgrade so the building stays functional until bots replace it
-local function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info)
+local function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations)
   local target_quality = get_next_building_quality(entity)
   if not target_quality or not modules_plan or not next(modules_plan) then return false end
+  local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
+  if not network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
+    return false
+  end
   local saved_pf = get_products_finished(entity)
   local upgrade_ok = pcall(function()
     entity.order_upgrade{
@@ -444,6 +459,8 @@ local function try_defer_quality_upgrade(entity, surface_name, modules_plan, rem
     }
   end)
   if upgrade_ok then
+    reserve_items(reservations, entity.name, target_quality, 1)
+    reserve_module_plan_items(reservations, modules_plan)
     table.insert(pending_replacements, {
       surface_name = surface_name,
       position = entity.position,
@@ -469,6 +486,15 @@ local function get_or_create_surface_queue(surface_name)
     processing_queues[surface_name] = {queue = {}, batch_upgraded = 0, batch_filled = 0}
   end
   return processing_queues[surface_name]
+end
+
+local function seed_pending_replacement_reservations(surface_name, reservations)
+  for _, task in ipairs(pending_replacements) do
+    if task.surface_name == surface_name then
+      reserve_items(reservations, task.entity_name, task.target_quality, 1)
+      reserve_module_plan_items(reservations, task.modules_plan)
+    end
+  end
 end
 
 local function refill_queue(surface_name)
@@ -508,6 +534,7 @@ local function refill_queue(surface_name)
   local sq = get_or_create_surface_queue(surface_name)
   sq.queue = {}
   local reservations = {}
+  seed_pending_replacement_reservations(surface_name, reservations)
 
   if USE_ABSOLUTE_PF then
     -- Absolute mode: sort all by total products_finished, queue top N needing work
@@ -519,7 +546,8 @@ local function refill_queue(surface_name)
 
       local result, info, modules_plan, removal_plan = check_building(entity, {dry_run = true, reservations = reservations})
       if result == "upgrade" or result == "fill" then
-        if try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info) then
+        if try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations) then
+          added = added + 1
           goto absolute_continue
         end
         table.insert(sq.queue, {
@@ -550,7 +578,8 @@ local function refill_queue(surface_name)
 
       local result, info, modules_plan, removal_plan = check_building(entity, {dry_run = true, reservations = reservations})
       if result == "upgrade" or result == "fill" then
-        if try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info) then
+        if try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations) then
+          added = added + 1
           goto direct_continue
         end
         table.insert(sq.queue, {
@@ -601,11 +630,6 @@ local function refill_queue(surface_name)
 
     local result, info, modules_plan, removal_plan = check_building(entity, {dry_run = true})
     if result == "upgrade" or result == "fill" then
-      -- Check for building quality upgrade opportunity
-      if try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info) then
-        goto scan_continue
-      end
-
       local entry = building_tracker[un]
       if entry then
         -- Update existing tracker entry
@@ -695,13 +719,16 @@ local function refill_queue(surface_name)
     end
   end)
 
-  local reservations = {}
   local queued = 0
-  for i = 1, math.min(QUEUE_SIZE_PER_PLANET, #tracked_list) do
-    local entry = tracked_list[i]
+  for _, entry in ipairs(tracked_list) do
+    if queued >= QUEUE_SIZE_PER_PLANET then break end
     if entry.entity and entry.entity.valid then
       local result, info, modules_plan, removal_plan = check_building(entry.entity, {dry_run = true, reservations = reservations})
       if result == "upgrade" or result == "fill" then
+        if try_defer_quality_upgrade(entry.entity, surface_name, modules_plan, removal_plan, info, reservations) then
+          queued = queued + 1
+          goto tracked_continue
+        end
         table.insert(sq.queue, {
           entity = entry.entity,
           modules_plan = modules_plan,
@@ -711,6 +738,7 @@ local function refill_queue(surface_name)
         queued = queued + 1
       end
     end
+    ::tracked_continue::
   end
 
   sq.batch_upgraded = 0
