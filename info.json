@@ -1,0 +1,9 @@
+{
+  "name": "AutoModuleUpgrade",
+  "version": "1.0.0",
+  "title": "Auto Module Upgrade",
+  "author": "silent + Cascade",
+  "dependencies": ["base >= 2.0.0"],
+  "description": "Automatically upgrades modules in buildings via logistic network. Checks every 5 minutes, prioritizes highest-production buildings, and uses item-request-proxy for atomic module swaps.",
+  "factorio_version": "2.0"
+}
