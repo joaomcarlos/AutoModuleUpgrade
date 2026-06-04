@@ -28,6 +28,14 @@ local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
 local NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
 local AMU_WINDOW_NAME = "amu_scan_window"
 
+-- Ensure persistent storage tables exist on every load (normal save/load doesn't run on_init/on_configuration_changed)
+storage.surface_buildings_upgraded = storage.surface_buildings_upgraded or {}
+storage.surface_modules_placed = storage.surface_modules_placed or {}
+storage.surface_last_upgraded = storage.surface_last_upgraded or {}
+storage.surface_camera_follow = storage.surface_camera_follow or {}
+if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
+storage.amu_gui_locations = storage.amu_gui_locations or {}
+
 -- Entity types that can receive quality upgrades but have no module slots
 local QUALITY_UPGRADEABLE_TYPES = {
   ["agricultural-tower"] = true,
