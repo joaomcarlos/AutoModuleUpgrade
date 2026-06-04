@@ -1421,9 +1421,11 @@ function update_scan_window(player)
       if storage.global_camera_follow == true then
         eye_btn.sprite = "utility/show_player_names_in_map_view"
         eye_btn.tooltip = "Global camera follow ON (click to use per-surface)"
+        eye_btn.toggled = true
       else
         eye_btn.sprite = "utility/cross_select"
         eye_btn.tooltip = "Global camera follow OFF — per-surface (click to force ON)"
+        eye_btn.toggled = false
       end
     end
     local log_btn = titlebar[AMU_WINDOW_NAME .. "-log"]
@@ -1431,9 +1433,11 @@ function update_scan_window(player)
       if storage.LOG_OVERRIDE then
         log_btn.sprite = "utility/search_icon"
         log_btn.tooltip = "Logging ON (click to disable)"
+        log_btn.toggled = true
       else
         log_btn.sprite = "utility/warning"
         log_btn.tooltip = "Logging OFF (click to enable)"
+        log_btn.toggled = false
       end
     end
   end
