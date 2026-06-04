@@ -16,7 +16,7 @@ local SCAN_INTERVAL = SCAN_INTERVAL_SEC * UPS -- Ticks between scans
 -- 16 aggressive, 4 conservative
 local SCAN_CHUNKS_PER_STEP = 64 -- Max chunks scanned per scheduler step
 -- 100 aggresive, 25 conservative
-local SCAN_ENTITIES_PER_STEP = 200 -- Max candidate buildings evaluated per scheduler step
+local SCAN_ENTITIES_PER_STEP = 100 -- Max candidate buildings evaluated per scheduler step
 
 -- Priority configuration
 local MIN_PF_DIFF = 15 -- Minimum production rate in items per minute to be eligible for rate-priority queuing
@@ -25,7 +25,7 @@ local MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rat
 
 -- Planet configuration
 local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
-local NO_PF_ENTITIES = {["agricultural-tower"] = true} -- Buildings that don't track products_finished; skip PF checks
+local NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
 
 -- Entity types that can receive quality upgrades but have no module slots
 local QUALITY_UPGRADEABLE_TYPES = {
@@ -440,9 +440,9 @@ local function check_building(entity, context)
         removal_plan = removal_plan
       }
       local surf_name = entity.surface.name
-      local do_camera = global_camera_follow
+      local do_camera = storage.global_camera_follow
       if do_camera == nil then
-        do_camera = surface_camera_follow[surf_name] == true
+        do_camera = storage.surface_camera_follow[surf_name] == true
       end
       if do_camera then
         for _, player in pairs(game.connected_players) do
@@ -452,7 +452,7 @@ local function check_building(entity, context)
           end
         end
       end
-      if DEBUG or LOG_OVERRIDE then
+      if DEBUG or storage.LOG_OVERRIDE then
         game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " — " .. info_str)
       end
     end
@@ -567,19 +567,13 @@ local active_scan_job = nil
 -- Per-surface scan status for GUI: surface_name -> {last_scan_tick, current_scan_start_tick, phase, candidates, queued, scanned}
 local scan_status = {}
 
--- Per-surface stats: buildings upgraded and modules placed by type
-local surface_buildings_upgraded = {} -- surface_name -> count
-local surface_modules_placed = {}     -- surface_name -> {module_name -> count}
-
--- Per-surface: last upgraded entity (for jump button) and position fallback
-local surface_last_upgraded = {} -- surface_name -> {entity = ref, x = x, y = y, tick = tick}
-
--- Per-surface: auto-follow camera after upgrade toggle
-local surface_camera_follow = {} -- surface_name -> boolean
-
--- Runtime toggles (controlled via GUI buttons)
-local global_camera_follow = nil -- nil = use per-surface; true = force ON everywhere; false = force OFF everywhere
-local LOG_OVERRIDE = false -- If true, enables key debug logs even when DEBUG is false
+-- Persistent data stored in storage (survives save/load):
+--   storage.surface_buildings_upgraded[surface_name] -> count
+--   storage.surface_modules_placed[surface_name] -> {module_name -> count}
+--   storage.surface_last_upgraded[surface_name] -> {x, y, tick}
+--   storage.surface_camera_follow[surface_name] -> boolean
+--   storage.global_camera_follow -> nil/true/false
+--   storage.LOG_OVERRIDE -> boolean
 
 -- Player scan window state: player_index -> {window, visible}
 local amu_gui_players = {}
@@ -981,19 +975,18 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
 
   -- Track stats
   local surface_name = entity.surface.name
-  surface_buildings_upgraded[surface_name] = (surface_buildings_upgraded[surface_name] or 0) + 1
-  surface_last_upgraded[surface_name] = {
-    entity = entity,
+  storage.surface_buildings_upgraded[surface_name] = (storage.surface_buildings_upgraded[surface_name] or 0) + 1
+  storage.surface_last_upgraded[surface_name] = {
     x = entity.position.x,
     y = entity.position.y,
     tick = game.tick
   }
   if has_modules then
-    if not surface_modules_placed[surface_name] then
-      surface_modules_placed[surface_name] = {}
+    if not storage.surface_modules_placed[surface_name] then
+      storage.surface_modules_placed[surface_name] = {}
     end
     for _, module_name in pairs(modules_plan) do
-      surface_modules_placed[surface_name][module_name] = (surface_modules_placed[surface_name][module_name] or 0) + 1
+      storage.surface_modules_placed[surface_name][module_name] = (storage.surface_modules_placed[surface_name][module_name] or 0) + 1
     end
   end
 
@@ -1038,9 +1031,9 @@ local function on_tick_handler()
         end
         apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
         sq.batch_upgraded = sq.batch_upgraded + 1
-        local do_camera = global_camera_follow
+        local do_camera = storage.global_camera_follow
         if do_camera == nil then
-          do_camera = surface_camera_follow[surface_name] == true
+          do_camera = storage.surface_camera_follow[surface_name] == true
         end
         if do_camera then
           for _, player in pairs(game.connected_players) do
@@ -1094,9 +1087,9 @@ local function on_tick_handler()
         -- Found the newly upgraded higher-quality building
         local pf_ok = pcall(function() e.products_finished = task.saved_pf end)
         apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
-        local do_camera = global_camera_follow
+        local do_camera = storage.global_camera_follow
         if do_camera == nil then
-          do_camera = surface_camera_follow[task.surface_name] == true
+          do_camera = storage.surface_camera_follow[task.surface_name] == true
         end
         if do_camera then
           for _, player in pairs(game.connected_players) do
@@ -1106,7 +1099,7 @@ local function on_tick_handler()
             end
           end
         end
-        if DEBUG or LOG_OVERRIDE then
+        if DEBUG or storage.LOG_OVERRIDE then
           game.print("[AutoModuleUpgrade] [UPGRADED] " .. e.name .. " at " .. e.position.x .. "," .. e.position.y .. " quality=" .. task.target_quality .. " pf_rate=" .. format_pf_rate(e) .. (pf_ok and "" or " (PF write failed)"))
         end
         table.remove(pending_replacements, i)
@@ -1119,6 +1112,16 @@ local function on_tick_handler()
   end
 
   step_scan_scheduler()
+
+  -- Re-sync GUI tracking after save/load (windows persist but local vars don't)
+  for _, player in pairs(game.connected_players) do
+    local window = player.gui.screen[AMU_WINDOW_NAME]
+    if window and window.valid then
+      if not amu_gui_players[player.index] then
+        amu_gui_players[player.index] = {window = window, visible = window.visible}
+      end
+    end
+  end
 
   -- Refresh scan status GUI for any players with the window open
   for _, player in pairs(game.connected_players) do
@@ -1133,6 +1136,14 @@ end
 script.on_configuration_changed(function()
   game.print("[AutoModuleUpgrade] Mod loaded, rebuilding module lookups...")
   build_module_lookups()
+  -- Ensure persistent storage tables exist
+  storage.surface_buildings_upgraded = storage.surface_buildings_upgraded or {}
+  storage.surface_modules_placed = storage.surface_modules_placed or {}
+  storage.surface_last_upgraded = storage.surface_last_upgraded or {}
+  storage.surface_camera_follow = storage.surface_camera_follow or {}
+  if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
+  if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
+  storage.amu_gui_locations = storage.amu_gui_locations or {}
   -- Destroy any stale windows so they get recreated with new layout
   for _, player in pairs(game.players) do
     if player.gui.screen[AMU_WINDOW_NAME] then
@@ -1144,6 +1155,14 @@ end)
 
 script.on_init(function()
   game.print("[AutoModuleUpgrade] Mod initialized.")
+  -- Initialize persistent storage tables
+  storage.surface_buildings_upgraded = {}
+  storage.surface_modules_placed = {}
+  storage.surface_last_upgraded = {}
+  storage.surface_camera_follow = {}
+  storage.global_camera_follow = nil
+  storage.LOG_OVERRIDE = false
+  storage.amu_gui_locations = {}
 end)
 
 -- Manual test command: type /amu-test in console
@@ -1399,7 +1418,7 @@ function update_scan_window(player)
   if titlebar then
     local eye_btn = titlebar[AMU_WINDOW_NAME .. "-eye"]
     if eye_btn and eye_btn.valid then
-      if global_camera_follow == true then
+      if storage.global_camera_follow == true then
         eye_btn.sprite = "utility/show_player_names_in_map_view"
         eye_btn.tooltip = "Global camera follow ON (click to use per-surface)"
       else
@@ -1409,7 +1428,7 @@ function update_scan_window(player)
     end
     local log_btn = titlebar[AMU_WINDOW_NAME .. "-log"]
     if log_btn and log_btn.valid then
-      if LOG_OVERRIDE then
+      if storage.LOG_OVERRIDE then
         log_btn.sprite = "utility/search_icon"
         log_btn.tooltip = "Logging ON (click to disable)"
       else
@@ -1522,7 +1541,7 @@ function update_scan_window(player)
     -- Upgraded (buildings)
     local upgraded_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-upgraded"]
     if upgraded_cell and upgraded_cell.valid then
-      local count = surface_buildings_upgraded[surface_name] or 0
+      local count = storage.surface_buildings_upgraded[surface_name] or 0
       upgraded_cell.caption = tostring(count)
       upgraded_cell.tooltip = "Buildings upgraded: " .. count
     end
@@ -1530,7 +1549,7 @@ function update_scan_window(player)
     -- Modules placed (grouped by category: quality / prod / speed; efficiency ignored)
     local mods_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-mods"]
     if mods_cell and mods_cell.valid then
-      local mod_stats = surface_modules_placed[surface_name]
+      local mod_stats = storage.surface_modules_placed[surface_name]
       local total = 0
       local by_cat = {} -- category -> count
       if mod_stats then
@@ -1591,8 +1610,8 @@ function update_scan_window(player)
     -- Jump button: center camera on last upgraded building
     local jump_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-jump"]
     if jump_cell and jump_cell.valid then
-      local last = surface_last_upgraded[surface_name]
-      if last and (last.entity and last.entity.valid) then
+      local last = storage.surface_last_upgraded[surface_name]
+      if last and last.tick then
         jump_cell.enabled = true
         jump_cell.tooltip = "Jump to last upgraded building"
       else
@@ -1604,7 +1623,7 @@ function update_scan_window(player)
     -- Camera toggle button: shows check_mark when enabled, close when disabled
     local cam_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-cam"]
     if cam_cell and cam_cell.valid then
-      local enabled = surface_camera_follow[surface_name] == true
+      local enabled = storage.surface_camera_follow[surface_name] == true
       cam_cell.sprite = enabled and "utility/check_mark" or "utility/close"
       cam_cell.tooltip = enabled and "Auto camera follow ON (click to disable)" or "Auto camera follow OFF (click to enable)"
     end
@@ -1657,13 +1676,9 @@ script.on_event(defines.events.on_gui_click, function(event)
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$"))
     local surface_name = PLANETS[row]
-    local last = surface_last_upgraded[surface_name]
+    local last = storage.surface_last_upgraded[surface_name]
     if last then
-      if last.entity and last.entity.valid then
-        player.centered_on = last.entity
-      else
-        player.zoom_to_world({x = last.x, y = last.y}, 1)
-      end
+      player.zoom_to_world({x = last.x, y = last.y}, 1)
     end
     return
   end
@@ -1672,18 +1687,18 @@ script.on_event(defines.events.on_gui_click, function(event)
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$"))
     local surface_name = PLANETS[row]
-    local current = surface_camera_follow[surface_name] == true
-    surface_camera_follow[surface_name] = not current
+    local current = storage.surface_camera_follow[surface_name] == true
+    storage.surface_camera_follow[surface_name] = not current
     update_scan_window(player)
     return
   end
 
   -- Eye button: toggle global camera follow override
   if name == AMU_WINDOW_NAME .. "-eye" then
-    if global_camera_follow == true then
-      global_camera_follow = nil -- back to per-surface
+    if storage.global_camera_follow == true then
+      storage.global_camera_follow = nil -- back to per-surface
     else
-      global_camera_follow = true -- force ON everywhere
+      storage.global_camera_follow = true -- force ON everywhere
     end
     update_scan_window(player)
     return
@@ -1691,7 +1706,7 @@ script.on_event(defines.events.on_gui_click, function(event)
 
   -- Log button: toggle LOG_OVERRIDE
   if name == AMU_WINDOW_NAME .. "-log" then
-    LOG_OVERRIDE = not LOG_OVERRIDE
+    storage.LOG_OVERRIDE = not storage.LOG_OVERRIDE
     update_scan_window(player)
     return
   end
