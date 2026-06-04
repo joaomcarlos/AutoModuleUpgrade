@@ -28,13 +28,15 @@ local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
 local NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
 local AMU_WINDOW_NAME = "amu_scan_window"
 
--- Ensure persistent storage tables exist on every load (normal save/load doesn't run on_init/on_configuration_changed)
-storage.surface_buildings_upgraded = storage.surface_buildings_upgraded or {}
-storage.surface_modules_placed = storage.surface_modules_placed or {}
-storage.surface_last_upgraded = storage.surface_last_upgraded or {}
-storage.surface_camera_follow = storage.surface_camera_follow or {}
-if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
-storage.amu_gui_locations = storage.amu_gui_locations or {}
+-- Helper: ensure storage tables exist (call before accessing storage in functions)
+local function ensure_storage()
+  if not storage.surface_buildings_upgraded then storage.surface_buildings_upgraded = {} end
+  if not storage.surface_modules_placed then storage.surface_modules_placed = {} end
+  if not storage.surface_last_upgraded then storage.surface_last_upgraded = {} end
+  if not storage.surface_camera_follow then storage.surface_camera_follow = {} end
+  if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
+  if not storage.amu_gui_locations then storage.amu_gui_locations = {} end
+end
 
 -- Entity types that can receive quality upgrades but have no module slots
 local QUALITY_UPGRADEABLE_TYPES = {
@@ -977,6 +979,7 @@ end
 
 -- Apply a pre-computed plan directly (no re-evaluation)
 local function apply_building_plan(entity, modules_plan, removal_plan, info)
+  ensure_storage()
   if not entity.valid then return end
   local has_modules = modules_plan and next(modules_plan)
   local has_removals = removal_plan and next(removal_plan)
@@ -1409,6 +1412,7 @@ end
 
 -- Update the scan status window for a player
 function update_scan_window(player)
+  ensure_storage()
   if not player or not player.valid then return end
   local gui_data = amu_gui_players[player.index]
   if not gui_data or not gui_data.visible then return end
@@ -1667,6 +1671,7 @@ end
 
 -- Event: GUI click
 script.on_event(defines.events.on_gui_click, function(event)
+  ensure_storage()
   local element = event.element
   if not element or not element.valid then return end
   local name = element.name or ""
