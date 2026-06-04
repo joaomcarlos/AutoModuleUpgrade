@@ -14,9 +14,9 @@ local UPS = 60 -- Game updates per second
 local SCAN_INTERVAL_SEC = 30 -- Seconds between scans
 local SCAN_INTERVAL = SCAN_INTERVAL_SEC * UPS -- Ticks between scans
 -- 16 aggressive, 4 conservative
-local SCAN_CHUNKS_PER_STEP = 64 -- Max chunks scanned per scheduler step
+local SCAN_CHUNKS_PER_STEP = 4 -- Max chunks scanned per scheduler step
 -- 100 aggresive, 25 conservative
-local SCAN_ENTITIES_PER_STEP = 100 -- Max candidate buildings evaluated per scheduler step
+local SCAN_ENTITIES_PER_STEP = 25 -- Max candidate buildings evaluated per scheduler step
 
 -- Priority configuration
 local MIN_PF_DIFF = 15 -- Minimum production rate in items per minute to be eligible for rate-priority queuing
@@ -28,17 +28,6 @@ local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
 local NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
 local AMU_WINDOW_NAME = "amu_scan_window"
 
--- Helper: ensure storage tables exist (call before accessing storage in functions)
-local function ensure_storage()
-  if not storage.surface_buildings_upgraded then storage.surface_buildings_upgraded = {} end
-  if not storage.surface_modules_placed then storage.surface_modules_placed = {} end
-  if not storage.surface_last_upgraded then storage.surface_last_upgraded = {} end
-  if not storage.surface_camera_follow then storage.surface_camera_follow = {} end
-  if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
-  if not storage.amu_gui_locations then storage.amu_gui_locations = {} end
-  if not storage.last_scanned_planet_index then storage.last_scanned_planet_index = 0 end
-end
-
 -- Entity types that can receive quality upgrades but have no module slots
 local QUALITY_UPGRADEABLE_TYPES = {
   ["agricultural-tower"] = true,
@@ -49,6 +38,25 @@ local module_tiers = {}
 local module_categories = {}
 local quality_order = {"normal", "uncommon", "rare", "epic", "legendary"}
 local quality_index = {normal = 1, uncommon = 2, rare = 3, epic = 4, legendary = 5}
+
+-- ============================================================
+-- Helper: ensure storage tables exist (call before accessing storage)
+-- ============================================================
+local function ensure_storage()
+  if not storage.surface_buildings_upgraded then storage.surface_buildings_upgraded = {} end
+  if not storage.surface_modules_placed then storage.surface_modules_placed = {} end
+  if not storage.surface_building_upgrades then storage.surface_building_upgrades = {} end
+  if not storage.surface_module_upgrades then storage.surface_module_upgrades = {} end
+  if not storage.surface_last_upgraded then storage.surface_last_upgraded = {} end
+  if not storage.surface_camera_follow then storage.surface_camera_follow = {} end
+  if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
+  if not storage.amu_gui_locations then storage.amu_gui_locations = {} end
+  if not storage.last_scanned_planet_index then storage.last_scanned_planet_index = 0 end
+end
+
+-- ============================================================
+-- Module Lookup System
+-- ============================================================
 
 -- Build lookup tables from item prototypes
 -- Uses LuaItemPrototype.category and LuaItemPrototype.tier (official API)
@@ -304,6 +312,10 @@ local function get_next_building_quality(entity)
   return quality_order[idx + 1]
 end
 
+-- ============================================================
+-- Building Evaluation & Proxy Management
+-- ============================================================
+
 -- Check a single building for upgrades/fills
 -- Returns: "upgrade", "fill", "none", or "skip" (plus optional info string)
 local function check_building(entity, context)
@@ -350,6 +362,7 @@ local function check_building(entity, context)
   local modules_plan = {}
   local removal_plan = {}
   local upgrade_counts = {} -- key -> count for grouping
+  local module_upgrade_details = {} -- {old_name, old_quality, new_name, new_quality}
   local fill_details = {}
   local did_anything = false
 
@@ -368,6 +381,12 @@ local function check_building(entity, context)
       })
       local key = abbr(slot_info.name, slot_info.quality) .. "->" .. abbr(new_name, new_quality)
       upgrade_counts[key] = (upgrade_counts[key] or 0) + 1
+      table.insert(module_upgrade_details, {
+        old_name = slot_info.name,
+        old_quality = slot_info.quality,
+        new_name = new_name,
+        new_quality = new_quality
+      })
       if reservations then
         reserve_items(reservations, new_name, new_quality, 1)
       end
@@ -389,6 +408,14 @@ local function check_building(entity, context)
       -- Empty machine: prefer productivity if allowed, else speed
       local proto = entity.prototype
       local productivity_allowed = proto.allowed_effects and proto.allowed_effects.productivity == true
+      if productivity_allowed then
+        local recipe = entity.get_recipe and entity:get_recipe()
+        if recipe and recipe.prototype and recipe.prototype.allowed_effects then
+          if recipe.prototype.allowed_effects.productivity ~= true then
+            productivity_allowed = false
+          end
+        end
+      end
       if productivity_allowed then
         best = find_best_available("productivity", logistic_network, reservations, #empty_slots)
       end
@@ -469,10 +496,10 @@ local function check_building(entity, context)
       end
     end
 
-    return "upgrade", info_str, modules_plan, removal_plan
+    return "upgrade", info_str, modules_plan, removal_plan, module_upgrade_details
   end
 
-  return "none", "no upgrade or fill available", nil, nil
+  return "none", "no upgrade or fill available", nil, nil, nil
 end
 
 -- Queue-based processing: per-surface queues, process 1 per tick per surface
@@ -486,6 +513,10 @@ local building_tracker = {}
 -- {surface_name, position={x,y}, entity_name, target_quality, saved_pf, modules_plan, removal_plan, info, tick_queued}
 local pending_replacements = {}
 local DEFERRED_MAX_AGE = 3600 * 60 -- 1 hour timeout in ticks
+
+-- ============================================================
+-- Rate Tracking & Queue Variables
+-- ============================================================
 
 -- Normalize raw diff to items per minute based on actual interval between readings
 local function get_rate_per_min(entry)
@@ -535,10 +566,12 @@ local function try_defer_quality_upgrade(entity, surface_name, modules_plan, rem
   if upgrade_ok then
     reserve_items(reservations, entity.name, target_quality, 1)
     reserve_module_plan_items(reservations, modules_plan)
+    local original_quality = entity.quality and entity.quality.name or "normal"
     table.insert(pending_replacements, {
       surface_name = surface_name,
       position = entity.position,
       entity_name = entity.name,
+      original_quality = original_quality,
       target_quality = target_quality,
       saved_pf = saved_pf,
       modules_plan = modules_plan,
@@ -570,6 +603,10 @@ local function seed_pending_replacement_reservations(surface_name, reservations)
     end
   end
 end
+
+-- ============================================================
+-- Scan Scheduler
+-- ============================================================
 
 local scan_queue = {}
 local queued_scan_surfaces = {}
@@ -777,7 +814,7 @@ local function step_scan_collect(job)
 end
 
 local function queue_entity_from_scan(job, entity)
-  local result, info, modules_plan, removal_plan = check_building(entity, {dry_run = true, reservations = job.reservations})
+  local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {dry_run = true, reservations = job.reservations})
   if result == "upgrade" or result == "fill" then
     if try_defer_quality_upgrade(entity, job.surface_name, modules_plan, removal_plan, info, job.reservations) then
       job.queued = job.queued + 1
@@ -787,7 +824,8 @@ local function queue_entity_from_scan(job, entity)
       entity = entity,
       modules_plan = modules_plan,
       removal_plan = removal_plan,
-      info = info
+      info = info,
+      module_upgrades = module_upgrade_details
     })
     job.queued = job.queued + 1
   end
@@ -849,7 +887,7 @@ local function step_rate_scan(job)
         goto rate_continue
       end
 
-      local result, info, modules_plan, removal_plan = check_building(entity, {dry_run = true})
+      local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {dry_run = true})
       if result == "upgrade" or result == "fill" then
         local entry = building_tracker[un]
         if entry then
@@ -867,6 +905,7 @@ local function step_rate_scan(job)
           entry.modules_plan = modules_plan
           entry.removal_plan = removal_plan
           entry.info = info
+          entry.module_upgrades = module_upgrade_details
         else
           building_tracker[un] = {
             entity = entity,
@@ -875,7 +914,8 @@ local function step_rate_scan(job)
             last_diff = 0,
             modules_plan = modules_plan,
             removal_plan = removal_plan,
-            info = info
+            info = info,
+            module_upgrades = module_upgrade_details
           }
         end
         job.scanned = job.scanned + 1
@@ -1009,8 +1049,11 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
     if not storage.surface_modules_placed[surface_name] then
       storage.surface_modules_placed[surface_name] = {}
     end
-    for _, module_name in pairs(modules_plan) do
-      storage.surface_modules_placed[surface_name][module_name] = (storage.surface_modules_placed[surface_name][module_name] or 0) + 1
+    for _, plan in ipairs(modules_plan) do
+      local mod_name = plan.id and plan.id.name
+      if mod_name then
+        storage.surface_modules_placed[surface_name][mod_name] = (storage.surface_modules_placed[surface_name][mod_name] or 0) + 1
+      end
     end
   end
 
@@ -1029,6 +1072,10 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
     game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " pf_rate=" .. format_pf_rate(entity) .. " — " .. (info or ""))
   end
 end
+
+-- ============================================================
+-- Tick Processing (main loop)
+-- ============================================================
 
 -- Process one building from each surface queue every tick
 local function on_tick_handler()
@@ -1055,6 +1102,13 @@ local function on_tick_handler()
         end
         apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
         sq.batch_upgraded = sq.batch_upgraded + 1
+        if entry.module_upgrades then
+          if not storage.surface_module_upgrades[surface_name] then storage.surface_module_upgrades[surface_name] = {} end
+          for _, upg in ipairs(entry.module_upgrades) do
+            local m_key = upg.old_name .. "|" .. upg.old_quality .. "|" .. upg.new_name .. "|" .. upg.new_quality
+            storage.surface_module_upgrades[surface_name][m_key] = (storage.surface_module_upgrades[surface_name][m_key] or 0) + 1
+          end
+        end
         local do_camera = storage.global_camera_follow
         if do_camera == nil then
           do_camera = storage.surface_camera_follow[surface_name] == true
@@ -1123,6 +1177,10 @@ local function on_tick_handler()
             end
           end
         end
+        -- Track building quality upgrade breakdown
+        if not storage.surface_building_upgrades[task.surface_name] then storage.surface_building_upgrades[task.surface_name] = {} end
+        local b_key = task.entity_name .. "|" .. task.original_quality .. "|" .. task.target_quality
+        storage.surface_building_upgrades[task.surface_name][b_key] = (storage.surface_building_upgrades[task.surface_name][b_key] or 0) + 1
         if DEBUG or storage.LOG_OVERRIDE then
           game.print("[AutoModuleUpgrade] [UPGRADED] " .. e.name .. " at " .. e.position.x .. "," .. e.position.y .. " quality=" .. task.target_quality .. " pf_rate=" .. format_pf_rate(e) .. (pf_ok and "" or " (PF write failed)"))
         end
@@ -1156,6 +1214,10 @@ local function on_tick_handler()
   end
 end
 
+-- ============================================================
+-- Event Handlers & Lifecycle
+-- ============================================================
+
 -- Build lookups on configuration changed (prototypes are not available during on_init)
 script.on_configuration_changed(function()
   game.print("[AutoModuleUpgrade] Mod loaded, rebuilding module lookups...")
@@ -1163,6 +1225,8 @@ script.on_configuration_changed(function()
   -- Ensure persistent storage tables exist
   storage.surface_buildings_upgraded = storage.surface_buildings_upgraded or {}
   storage.surface_modules_placed = storage.surface_modules_placed or {}
+  storage.surface_building_upgrades = storage.surface_building_upgrades or {}
+  storage.surface_module_upgrades = storage.surface_module_upgrades or {}
   storage.surface_last_upgraded = storage.surface_last_upgraded or {}
   storage.surface_camera_follow = storage.surface_camera_follow or {}
   if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
@@ -1182,12 +1246,18 @@ script.on_init(function()
   -- Initialize persistent storage tables
   storage.surface_buildings_upgraded = {}
   storage.surface_modules_placed = {}
+  storage.surface_building_upgrades = {}
+  storage.surface_module_upgrades = {}
   storage.surface_last_upgraded = {}
   storage.surface_camera_follow = {}
   storage.global_camera_follow = nil
   storage.LOG_OVERRIDE = false
   storage.amu_gui_locations = {}
 end)
+
+-- ============================================================
+-- Commands
+-- ============================================================
 
 -- Manual test command: type /amu-test in console
 commands.add_command("amu-test", "Manually trigger AutoModuleUpgrade queue refill for all planets", function()
@@ -1570,7 +1640,21 @@ function update_scan_window(player)
     if upgraded_cell and upgraded_cell.valid then
       local count = storage.surface_buildings_upgraded[surface_name] or 0
       upgraded_cell.caption = tostring(count)
-      upgraded_cell.tooltip = "Buildings upgraded: " .. count
+      local b_upgs = storage.surface_building_upgrades[surface_name]
+      if b_upgs and next(b_upgs) then
+        local items = {}
+        for key, c in pairs(b_upgs) do
+          local name, from, to = key:match("(.+)|(.+)|(.+)")
+          local pretty = name and (name:gsub("-", " "):gsub("^%l", string.upper)) or key
+          table.insert(items, {count = c, text = c .. "x " .. pretty .. " " .. (from or "?") .. "→" .. (to or "?")})
+        end
+        table.sort(items, function(a, b) return a.count > b.count end)
+        local lines = {}
+        for _, item in ipairs(items) do table.insert(lines, item.text) end
+        upgraded_cell.tooltip = table.concat(lines, "\n")
+      else
+        upgraded_cell.tooltip = "No buildings upgraded yet"
+      end
     end
 
     -- Modules placed (grouped by category: quality / prod / speed; efficiency ignored)
@@ -1589,7 +1673,21 @@ function update_scan_window(player)
         end
       end
       mods_cell.caption = tostring(total)
-      if next(by_cat) then
+      -- Tooltip: show module upgrade breakdown sorted by count desc
+      local m_upgs = storage.surface_module_upgrades[surface_name]
+      if m_upgs and next(m_upgs) then
+        local items = {}
+        for key, c in pairs(m_upgs) do
+          local old_name, old_q, new_name, new_q = key:match("(.+)|(.+)|(.+)|(.+)")
+          local pretty_old = old_name and (old_name:gsub("-", " "):gsub("^%l", string.upper)) or "?"
+          local pretty_new = new_name and (new_name:gsub("-", " "):gsub("^%l", string.upper)) or "?"
+          table.insert(items, {count = c, text = c .. "x " .. pretty_old .. " " .. (old_q or "?") .. "→" .. pretty_new .. " " .. (new_q or "?")})
+        end
+        table.sort(items, function(a, b) return a.count > b.count end)
+        local lines = {}
+        for _, item in ipairs(items) do table.insert(lines, item.text) end
+        mods_cell.tooltip = table.concat(lines, "\n")
+      elseif next(by_cat) then
         local tooltip_parts = {}
         for cat, count in pairs(by_cat) do
           table.insert(tooltip_parts, cat:sub(1,1):upper() .. cat:sub(2) .. ": " .. count)
@@ -1706,7 +1804,12 @@ script.on_event(defines.events.on_gui_click, function(event)
     local surface_name = PLANETS[row]
     local last = storage.surface_last_upgraded[surface_name]
     if last then
-      player.zoom_to_world({x = last.x, y = last.y}, 1)
+      player.set_controller{
+        type = defines.controllers.remote,
+        position = {x = last.x, y = last.y},
+        surface = surface_name
+      }
+      player.zoom = 1
     end
     return
   end
