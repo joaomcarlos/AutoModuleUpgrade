@@ -6,13 +6,14 @@ local MIN_READINGS = 3 -- Minimum pf snapshots before rate-based sorting kicks i
 local UPS = 60 -- Game updates per second
 local SCAN_INTERVAL_SEC = 30 -- Seconds between scans
 local SCAN_INTERVAL = SCAN_INTERVAL_SEC * UPS -- Ticks between scans
-local SCAN_CHUNKS_PER_STEP = 4 -- Max chunks scanned per scheduler step
-local SCAN_ENTITIES_PER_STEP = 25 -- Max candidate buildings evaluated per scheduler step
+local SCAN_CHUNKS_PER_STEP = 16 -- Max chunks scanned per scheduler step
+local SCAN_ENTITIES_PER_STEP = 100 -- Max candidate buildings evaluated per scheduler step
 local MIN_PF_DIFF = 15 -- Minimum production rate in items per minute to be eligible for rate-priority queuing
 local QUEUE_SIZE_PER_PLANET = 100 -- Max buildings queued per surface per scan
 local MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rate-based priority
 local MOVE_CAMERA_AFTER_UPGRADE = true -- Center camera on building after applying module upgrades
 local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
+local NO_PF_ENTITIES = {["agricultural-tower"] = true} -- Buildings that don't track products_finished; skip PF checks
 
 -- Module-level lookup tables (rebuilt on load, not stored in storage)
 local module_tiers = {}
@@ -270,31 +271,33 @@ end
 local function check_building(entity, context)
   if not entity.valid then return "skip", "invalid" end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() then return "skip", "ghost/decon" end
-  if not entity.prototype or not entity.prototype.module_inventory_size or entity.prototype.module_inventory_size <= 0 then return "skip", "no modules" end
   local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
   if not logistic_network then return "none", "no logistic network" end
 
   local reservations = context and context.reservations or nil
 
-  local module_inv = entity.get_module_inventory()
-  if not module_inv then return "none", "no module inventory" end
+  local has_modules = entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0
+  local module_inv = has_modules and entity.get_module_inventory() or nil
 
-  local module_count = #module_inv
   local filled_slots = {}
   local empty_slots = {}
   local category_counts = {}
+  local module_count = 0
 
-  -- Scan all slots
-  for slot = 1, module_count do
-    local stack = module_inv[slot]
-    if stack and stack.valid_for_read then
-      table.insert(filled_slots, {slot = slot, name = stack.name, quality = stack.quality.name})
-      local cat = module_categories[stack.name]
-      if cat then
-        category_counts[cat] = (category_counts[cat] or 0) + 1
+  if module_inv then
+    module_count = #module_inv
+    -- Scan all slots
+    for slot = 1, module_count do
+      local stack = module_inv[slot]
+      if stack and stack.valid_for_read then
+        table.insert(filled_slots, {slot = slot, name = stack.name, quality = stack.quality.name})
+        local cat = module_categories[stack.name]
+        if cat then
+          category_counts[cat] = (category_counts[cat] or 0) + 1
+        end
+      else
+        table.insert(empty_slots, slot)
       end
-    else
-      table.insert(empty_slots, slot)
     end
   end
 
@@ -363,6 +366,21 @@ local function check_building(entity, context)
         reserve_items(reservations, best.name, best.quality, #empty_slots)
       end
       did_anything = true
+    end
+  end
+
+  if not did_anything then
+    -- No module work; check if the building itself can receive a quality upgrade
+    local target_quality = get_next_building_quality(entity)
+    if target_quality and network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
+      local info_str = "quality -> " .. target_quality
+      if not (context and context.dry_run) then
+        if try_defer_quality_upgrade(entity, entity.surface.name, modules_plan, removal_plan, info_str, reservations) then
+          return "upgrade", info_str, modules_plan, removal_plan
+        end
+      end
+      -- dry_run path for scan: still report as upgrade so it gets queued
+      return "upgrade", info_str, modules_plan, removal_plan
     end
   end
 
@@ -436,6 +454,21 @@ local function get_products_finished(entity)
   return ok and val or 0
 end
 
+-- Format a building's production info for logging:
+--   rate if tracker has enough data, else raw products_finished
+local function format_pf_rate(entity)
+  local ok, pf = pcall(function() return entity.products_finished end)
+  if not ok then return "n/a" end
+  if entity.unit_number and building_tracker[entity.unit_number] then
+    local r = get_rate_per_min(building_tracker[entity.unit_number])
+    if r > 0 then
+      return math.floor(r + 0.5) .. "/min"
+    end
+  end
+  -- No meaningful rate yet; show raw products_finished
+  return "pf=" .. pf
+end
+
 -- Get the next higher quality level for a building (e.g. epic -> legendary)
 local function get_next_building_quality(entity)
   if not entity.quality then return nil end
@@ -477,7 +510,7 @@ local function try_defer_quality_upgrade(entity, surface_name, modules_plan, rem
       original_unit_number = entity.unit_number
     })
     if DEBUG then
-      game.print("[AutoModuleUpgrade] [DEFER] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " -> " .. target_quality .. " (pf=" .. saved_pf .. ")")
+      game.print("[AutoModuleUpgrade] [DEFER] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " -> " .. target_quality .. " (pf_rate=" .. format_pf_rate(entity) .. ")")
     end
     return true
   end
@@ -505,6 +538,12 @@ local queued_scan_surfaces = {}
 local scan_cycle_surfaces = {}
 local active_scan_job = nil
 
+-- Per-surface scan status for GUI: surface_name -> {last_scan_tick, current_scan_start_tick, phase, candidates, queued, scanned}
+local scan_status = {}
+
+-- Player scan window state: player_index -> {window, visible}
+local amu_gui_players = {}
+
 local function get_player_force_names()
   local force_names = {}
   local seen = {}
@@ -517,14 +556,17 @@ local function get_player_force_names()
   return force_names
 end
 
-local function is_module_candidate(entity)
-  return entity.valid
-    and entity.prototype
-    and entity.prototype.module_inventory_size
-    and entity.prototype.module_inventory_size > 0
-    and entity.type ~= "entity-ghost"
-    and entity.type ~= "tile-ghost"
-    and not entity.to_be_deconstructed()
+local function is_upgrade_candidate(entity)
+  if not entity.valid then return false end
+  if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() then return false end
+  if entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0 then
+    return true
+  end
+  -- Also include buildings that can receive a quality upgrade (e.g. agricultural tower)
+  if get_next_building_quality(entity) then
+    return true
+  end
+  return false
 end
 
 local function enqueue_scan(surface_name)
@@ -568,6 +610,14 @@ local function finish_scan_job(job)
       game.print("[AutoModuleUpgrade] [QUEUE] Direct queued=" .. job.queued .. " for " .. job.surface_name)
     end
   end
+  scan_status[job.surface_name] = {
+    last_scan_tick = game.tick,
+    current_scan_start_tick = nil,
+    phase = "idle",
+    candidates = job.all_entities and #job.all_entities or 0,
+    queued = job.queued,
+    scanned = job.scanned
+  }
   active_scan_job = nil
   if #scan_queue == 0 then
     scan_cycle_surfaces = {}
@@ -612,6 +662,15 @@ local function start_next_scan_job()
         sq = sq
       }
 
+      scan_status[surface_name] = {
+        last_scan_tick = scan_status[surface_name] and scan_status[surface_name].last_scan_tick or nil,
+        current_scan_start_tick = game.tick,
+        phase = "collect",
+        candidates = 0,
+        queued = 0,
+        scanned = 0
+      }
+
       if DEBUG then
         game.print("[AutoModuleUpgrade] [SCAN] Started incremental scan for " .. surface_name)
       end
@@ -638,8 +697,9 @@ local function step_scan_collect(job)
       job.phase = "evaluate"
       job.index = 1
       if DEBUG then
-        local first_pf = job.all_entities[1] and get_products_finished(job.all_entities[1]) or "n/a"
-        game.print("[AutoModuleUpgrade] [SCAN] Collected " .. #job.all_entities .. " candidates for " .. job.surface_name .. " top_pf=" .. first_pf)
+        local first_ent = job.all_entities[1]
+        local top_rate = first_ent and format_pf_rate(first_ent) or "n/a"
+        game.print("[AutoModuleUpgrade] [SCAN] Collected " .. #job.all_entities .. " candidates for " .. job.surface_name .. " top_pf_rate=" .. top_rate)
       end
       return
     end
@@ -647,7 +707,7 @@ local function step_scan_collect(job)
     if job.surface.is_chunk_generated({chunk.x, chunk.y}) then
       for _, force_name in ipairs(job.force_names) do
         for _, entity in pairs(job.surface.find_entities_filtered{area = chunk.area, force = force_name}) do
-          if is_module_candidate(entity) then
+          if is_upgrade_candidate(entity) then
             table.insert(job.all_entities, entity)
           end
         end
@@ -655,6 +715,8 @@ local function step_scan_collect(job)
     end
     chunks_scanned = chunks_scanned + 1
   end
+  local st = scan_status[job.surface_name]
+  if st then st.candidates = #job.all_entities end
 end
 
 local function queue_entity_from_scan(job, entity)
@@ -695,6 +757,8 @@ local function step_absolute_or_direct_scan(job)
   if job.index > #job.all_entities then
     finish_scan_job(job)
   end
+  local st = scan_status[job.surface_name]
+  if st then st.queued = job.queued end
 end
 
 local function step_rate_scan(job)
@@ -722,7 +786,8 @@ local function step_rate_scan(job)
       if not un then goto rate_continue end
 
       local pf = get_products_finished(entity)
-      if pf < MIN_PRODUCTS then
+      local skip_pf_check = NO_PF_ENTITIES[entity.name]
+      if not skip_pf_check and pf < MIN_PRODUCTS then
         job.skipped_low_pf = job.skipped_low_pf + 1
         goto rate_continue
       end
@@ -767,13 +832,18 @@ local function step_rate_scan(job)
     if job.index > #job.all_entities then
       job.phase = "prepare_tracked_queue"
     end
+    local st = scan_status[job.surface_name]
+    if st then st.scanned = job.scanned; st.phase = job.phase end
     return
   end
 
   if job.phase == "prepare_tracked_queue" then
+    local st = scan_status[job.surface_name]
+    if st then st.phase = job.phase; st.candidates = #job.all_entities end
     if DEBUG then
-      local first_pf = job.all_entities[1] and get_products_finished(job.all_entities[1]) or "n/a"
-      game.print("[AutoModuleUpgrade] [DIAG] total=" .. #job.all_entities .. " top_pf=" .. first_pf .. " proxy=" .. job.skipped_proxy .. " low_pf=" .. job.skipped_low_pf .. " no_work=" .. job.skipped_no_work .. " tracked=" .. job.scanned)
+      local first_ent = job.all_entities[1]
+      local top_rate = first_ent and format_pf_rate(first_ent) or "n/a"
+      game.print("[AutoModuleUpgrade] [DIAG] total=" .. #job.all_entities .. " top_pf_rate=" .. top_rate .. " proxy=" .. job.skipped_proxy .. " low_pf=" .. job.skipped_low_pf .. " no_work=" .. job.skipped_no_work .. " tracked=" .. job.scanned)
     end
 
     for un, entry in pairs(building_tracker) do
@@ -784,7 +854,7 @@ local function step_rate_scan(job)
 
     job.tracked_list = {}
     for un, entry in pairs(building_tracker) do
-      if entry.entity and entry.entity.valid and #entry.pf_history >= MIN_READINGS and get_rate_per_min(entry) >= MIN_PF_DIFF then
+      if entry.entity and entry.entity.valid then
         table.insert(job.tracked_list, entry)
       end
     end
@@ -833,6 +903,8 @@ local function step_rate_scan(job)
       finish_scan_job(job)
     end
   end
+  local st = scan_status[job.surface_name]
+  if st then st.queued = job.queued; st.phase = job.phase end
 end
 
 local function step_scan_scheduler()
@@ -875,22 +947,7 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
     removal_plan = removal_plan
   }
   if DEBUG then
-    local ok, pf = pcall(function() return entity.products_finished end)
-    local pf_str = ""
-    if ok and pf then
-      local tracker_entry = entity.unit_number and building_tracker[entity.unit_number]
-      if tracker_entry then
-        local rate = get_rate_per_min(tracker_entry)
-        if rate > 0 then
-          pf_str = " [rate=" .. math.floor(rate + 0.5) .. "/min]"
-        else
-          pf_str = " [pf=" .. pf .. "]"
-        end
-      else
-        pf_str = " [pf=" .. pf .. "]"
-      end
-    end
-    game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. pf_str .. " — " .. (info or ""))
+    game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " [" .. format_pf_rate(entity) .. "] — " .. (info or ""))
   end
 end
 
@@ -904,6 +961,19 @@ local function on_tick_handler()
       local entry = table.remove(sq.queue, 1)
       local entity = entry.entity
       if entity.valid then
+        -- Skip if rate-priority mode and building has no meaningful rate yet
+        if USE_RATE_PRIORITY then
+          local skip_rate = NO_PF_ENTITIES[entity.name]
+          if not skip_rate then
+            local tr = entity.unit_number and building_tracker[entity.unit_number]
+            if not tr or get_rate_per_min(tr) <= 0 then
+              if DEBUG then
+                game.print("[AutoModuleUpgrade] [SKIP] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " — no production rate yet")
+              end
+              goto skip_apply
+            end
+          end
+        end
         apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
         sq.batch_upgraded = sq.batch_upgraded + 1
         if MOVE_CAMERA_AFTER_UPGRADE then
@@ -914,6 +984,7 @@ local function on_tick_handler()
             end
           end
         end
+        ::skip_apply::
       end
     end
 
@@ -958,7 +1029,7 @@ local function on_tick_handler()
         local pf_ok = pcall(function() e.products_finished = task.saved_pf end)
         apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
         if DEBUG then
-          game.print("[AutoModuleUpgrade] [RESTORE] " .. e.name .. " at " .. e.position.x .. "," .. e.position.y .. " quality=" .. task.target_quality .. " pf=" .. task.saved_pf .. (pf_ok and "" or " (PF write failed)"))
+          game.print("[AutoModuleUpgrade] [RESTORE] " .. e.name .. " at " .. e.position.x .. "," .. e.position.y .. " quality=" .. task.target_quality .. " pf_rate=" .. format_pf_rate(e) .. (pf_ok and "" or " (PF write failed)"))
         end
         table.remove(pending_replacements, i)
         goto next_deferred
@@ -970,6 +1041,14 @@ local function on_tick_handler()
   end
 
   step_scan_scheduler()
+
+  -- Refresh scan status GUI for any players with the window open
+  for _, player in pairs(game.connected_players) do
+    local gui_data = amu_gui_players[player.index]
+    if gui_data and gui_data.visible then
+      update_scan_window(player)
+    end
+  end
 end
 
 -- Build lookups on configuration changed (prototypes are not available during on_init)
@@ -1065,5 +1144,392 @@ commands.add_command("amu-debug-lookups", "Debug module lookup tables", function
     end
   else
     game.print("[AutoModuleUpgrade] [DEBUG] productivity-module-3 NOT FOUND in prototypes.item")
+  end
+end)
+
+-- ============================================================
+-- Scan Status GUI
+-- ============================================================
+
+local AMU_WINDOW_NAME = "amu_scan_window"
+
+-- Helper: format tick delta as mm:ss
+local function format_time(ticks)
+  if not ticks or ticks < 0 then return "0:00" end
+  local total_seconds = math.floor(ticks / 60)
+  local minutes = math.floor(total_seconds / 60)
+  local seconds = total_seconds % 60
+  return string.format("%d:%02d", minutes, seconds)
+end
+
+-- Helper: get valid planet sprite path
+local function get_planet_sprite(surface_name)
+  local path = "space-location/" .. surface_name
+  if helpers.is_valid_sprite_path(path) then
+    return path
+  end
+  return "utility/questionmark"
+end
+
+-- Create or recreate the scan status window for a player
+local function create_scan_window(player)
+  if not player or not player.valid then return end
+  local screen = player.gui.screen
+  if screen[AMU_WINDOW_NAME] then
+    screen[AMU_WINDOW_NAME].destroy()
+  end
+
+  local window = screen.add{
+    type = "frame",
+    name = AMU_WINDOW_NAME,
+    direction = "vertical"
+  }
+  window.style.maximal_width = 520
+
+  -- Title bar with drag handle and close button
+  local titlebar = window.add{
+    type = "flow",
+    name = AMU_WINDOW_NAME .. "-titlebar",
+    direction = "horizontal"
+  }
+  titlebar.drag_target = window
+
+  titlebar.add{
+    type = "label",
+    caption = "AutoModuleUpgrade Scans",
+    style = "frame_title",
+    ignored_by_interaction = true
+  }
+
+  local dragger = titlebar.add{
+    type = "empty-widget",
+    style = "draggable_space_header",
+    ignored_by_interaction = true
+  }
+  dragger.style.horizontally_stretchable = true
+  dragger.style.vertically_stretchable = true
+
+  titlebar.add{
+    type = "sprite-button",
+    sprite = "utility/close",
+    style = "frame_action_button",
+    name = AMU_WINDOW_NAME .. "-close",
+    mouse_button_filter = {"left"}
+  }
+
+  -- Content frame
+  local content = window.add{
+    type = "frame",
+    name = AMU_WINDOW_NAME .. "-content",
+    style = "inside_shallow_frame",
+    direction = "vertical"
+  }
+
+  local scroll = content.add{
+    type = "scroll-pane",
+    name = AMU_WINDOW_NAME .. "-scroll",
+    style = "naked_scroll_pane",
+    horizontal_scroll_policy = "never"
+  }
+  scroll.style.padding = 2
+  scroll.style.maximal_height = 300
+
+  local table_el = scroll.add{
+    type = "table",
+    name = AMU_WINDOW_NAME .. "-table",
+    column_count = 5,
+    draw_horizontal_lines = true,
+    draw_horizontal_line_after_headers = true,
+    draw_vertical_lines = false
+  }
+  table_el.style.horizontal_spacing = 8
+  table_el.style.vertical_spacing = 4
+  table_el.style.column_alignments[1] = "center"
+  table_el.style.column_alignments[2] = "right"
+  table_el.style.column_alignments[3] = "right"
+  table_el.style.column_alignments[4] = "right"
+  table_el.style.column_alignments[5] = "left"
+
+  -- Headers
+  table_el.add{type = "sprite", sprite = "space-location/nauvis", tooltip = "Planet"}.style.size = {26, 26}
+  table_el.add{type = "label", caption = "Queued", style = "bold_label"}
+  table_el.add{type = "label", caption = "Cand", style = "bold_label"}
+  local clock_header = table_el.add{type = "sprite", sprite = "utility/clock", tooltip = "Scan time / age"}
+  clock_header.style.size = {26, 26}
+  table_el.add{type = "label", caption = "Status", style = "bold_label"}
+
+  -- Store reference
+  amu_gui_players[player.index] = {window = window, visible = true}
+
+  -- Restore location if known
+  local pdata = storage.amu_gui_locations and storage.amu_gui_locations[player.index]
+  if pdata then
+    window.location = pdata
+  else
+    window.location = {x = 200, y = 100}
+  end
+
+  update_scan_window(player)
+end
+
+-- Update the scan status window for a player
+function update_scan_window(player)
+  if not player or not player.valid then return end
+  local gui_data = amu_gui_players[player.index]
+  if not gui_data or not gui_data.visible then return end
+
+  local window = player.gui.screen[AMU_WINDOW_NAME]
+  if not window then
+    create_scan_window(player)
+    window = player.gui.screen[AMU_WINDOW_NAME]
+    if not window then return end
+  end
+
+  local table_el = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-table"]
+  if not table_el then return end
+
+  local columns = 5
+  local header_cells = columns
+  local child_count = #table_el.children
+  local current_rows = 0
+  if child_count >= header_cells then
+    current_rows = math.floor((child_count - header_cells) / columns)
+  end
+
+  local target_rows = #PLANETS
+  -- Add or remove rows to match planet count
+  if current_rows < target_rows then
+    for r = current_rows + 1, target_rows do
+      local surface_name = PLANETS[r]
+      -- Planet sprite
+      local spr = table_el.add{type = "sprite", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-planet"}
+      spr.style.size = {26, 26}
+      spr.style.stretch_image_to_widget_size = true
+      -- Queued
+      local q = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-queued", caption = "0"}
+      q.style.horizontal_align = "right"
+      -- Candidates
+      local c = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-cand", caption = "0"}
+      c.style.horizontal_align = "right"
+      -- Time / watch
+      local t = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-time", caption = ""}
+      t.style.horizontal_align = "right"
+      t.style.minimal_width = 50
+      -- Status
+      local s = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-status", caption = ""}
+    end
+  elseif current_rows > target_rows then
+    local to_remove = (current_rows - target_rows) * columns
+    for _ = 1, to_remove do
+      local children = table_el.children
+      local last = children[#children]
+      if last and last.valid then last.destroy() end
+    end
+  end
+
+  -- Populate rows
+  for i, surface_name in ipairs(PLANETS) do
+    local st = scan_status[surface_name] or {}
+    local is_scanning = st.current_scan_start_tick ~= nil
+    local elapsed = 0
+    if is_scanning then
+      elapsed = game.tick - st.current_scan_start_tick
+    elseif st.last_scan_tick then
+      elapsed = game.tick - st.last_scan_tick
+    end
+
+    -- Planet icon
+    local planet_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-planet"]
+    if planet_cell and planet_cell.valid then
+      planet_cell.sprite = get_planet_sprite(surface_name)
+      planet_cell.tooltip = surface_name
+    end
+
+    -- Queued
+    local queued_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-queued"]
+    if queued_cell and queued_cell.valid then
+      local sq = processing_queues[surface_name]
+      local queue_size = sq and #sq.queue or 0
+      queued_cell.caption = tostring(queue_size)
+      queued_cell.tooltip = "Queued: " .. queue_size
+    end
+
+    -- Candidates
+    local cand_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-cand"]
+    if cand_cell and cand_cell.valid then
+      cand_cell.caption = tostring(st.candidates or 0)
+      cand_cell.tooltip = "Candidates collected"
+    end
+
+    -- Time / watch (green when scanning, white when idle)
+    local time_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-time"]
+    if time_cell and time_cell.valid then
+      if is_scanning then
+        time_cell.caption = format_time(elapsed)
+        time_cell.style.font_color = {r = 0.3, g = 1.0, b = 0.3} -- green
+        time_cell.tooltip = "Scanning for " .. format_time(elapsed)
+      else
+        time_cell.caption = st.last_scan_tick and format_time(elapsed) or "—"
+        time_cell.style.font_color = {r = 1.0, g = 1.0, b = 1.0} -- white
+        time_cell.tooltip = st.last_scan_tick and ("Last scan " .. format_time(elapsed) .. " ago") or "Not scanned yet"
+      end
+    end
+
+    -- Status
+    local status_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-status"]
+    if status_cell and status_cell.valid then
+      if is_scanning then
+        status_cell.caption = st.phase or "scanning"
+        status_cell.tooltip = "Currently scanning"
+      else
+        local sq = processing_queues[surface_name]
+        local queue_size = sq and #sq.queue or 0
+        if queue_size > 0 then
+          status_cell.caption = "queueing"
+          status_cell.tooltip = queue_size .. " buildings queued"
+        else
+          status_cell.caption = "idle"
+          status_cell.tooltip = "Waiting for next scan"
+        end
+      end
+    end
+  end
+end
+
+-- Toggle scan window visibility
+local function toggle_scan_window(player)
+  if not player or not player.valid then return end
+  local gui_data = amu_gui_players[player.index]
+  local window = player.gui.screen[AMU_WINDOW_NAME]
+
+  if window and window.valid then
+    local new_visible = not window.visible
+    window.visible = new_visible
+    if gui_data then gui_data.visible = new_visible end
+    if new_visible then
+      update_scan_window(player)
+    end
+  else
+    create_scan_window(player)
+  end
+end
+
+-- Event: GUI click
+script.on_event(defines.events.on_gui_click, function(event)
+  local element = event.element
+  if not element or not element.valid then return end
+  local name = element.name or ""
+
+  if name == AMU_WINDOW_NAME .. "-close" then
+    local player = game.get_player(event.player_index)
+    if player and player.valid then
+      local window = player.gui.screen[AMU_WINDOW_NAME]
+      if window and window.valid then
+        window.visible = false
+        local gui_data = amu_gui_players[player.index]
+        if gui_data then gui_data.visible = false end
+      end
+    end
+  end
+end)
+
+-- Event: window moved
+script.on_event(defines.events.on_gui_location_changed, function(event)
+  local element = event.element
+  if not element or not element.valid then return end
+  if element.name == AMU_WINDOW_NAME then
+    if not storage.amu_gui_locations then
+      storage.amu_gui_locations = {}
+    end
+    storage.amu_gui_locations[event.player_index] = {x = element.location.x, y = element.location.y}
+  end
+end)
+
+-- Command to toggle scan window
+commands.add_command("amu-scans", "Toggle AutoModuleUpgrade scan status window", function(event)
+  local player = game.get_player(event.player_index)
+  if player and player.valid then
+    toggle_scan_window(player)
+  end
+end)
+
+-- Bottom-center screen button to toggle scan window
+local AMU_BOTTOM_BUTTON = "amu_scan_toggle_button"
+
+local function position_bottom_button(button, player)
+  local res = player.display_resolution
+  local scale = player.display_scale
+  local x = math.floor((res.width / scale) / 2 - 16)
+  local y = math.floor((res.height / scale) - 72)
+  button.location = {x = x, y = y}
+end
+
+local function create_bottom_button(player)
+  if not player or not player.valid then return end
+  local screen = player.gui.screen
+  if screen[AMU_BOTTOM_BUTTON] then
+    screen[AMU_BOTTOM_BUTTON].destroy()
+  end
+  local button = screen.add{
+    type = "sprite-button",
+    name = AMU_BOTTOM_BUTTON,
+    sprite = "item/quality-module-3",
+    style = "slot_button",
+    tooltip = "Toggle AutoModuleUpgrade scan window"
+  }
+  button.style.size = {32, 32}
+  position_bottom_button(button, player)
+end
+
+-- Create button for joining players
+for _, event_type in pairs{
+  defines.events.on_player_joined_game,
+  defines.events.on_player_created,
+  defines.events.on_player_respawned
+} do
+  script.on_event(event_type, function(e)
+    local player = game.get_player(e.player_index)
+    if player and player.valid then
+      create_bottom_button(player)
+    end
+  end)
+end
+
+-- Reposition button when display changes
+script.on_event(defines.events.on_player_display_resolution_changed, function(event)
+  local player = game.get_player(event.player_index)
+  if not player or not player.valid then return end
+  local button = player.gui.screen[AMU_BOTTOM_BUTTON]
+  if button and button.valid then
+    position_bottom_button(button, player)
+  else
+    create_bottom_button(player)
+  end
+end)
+
+-- Handle bottom button click
+script.on_event(defines.events.on_gui_click, function(event)
+  local element = event.element
+  if not element or not element.valid then return end
+  local name = element.name or ""
+
+  if name == AMU_BOTTOM_BUTTON then
+    local player = game.get_player(event.player_index)
+    if player and player.valid then
+      toggle_scan_window(player)
+    end
+    return
+  end
+
+  if name == AMU_WINDOW_NAME .. "-close" then
+    local player = game.get_player(event.player_index)
+    if player and player.valid then
+      local window = player.gui.screen[AMU_WINDOW_NAME]
+      if window and window.valid then
+        window.visible = false
+        local gui_data = amu_gui_players[player.index]
+        if gui_data then gui_data.visible = false end
+      end
+    end
   end
 end)
