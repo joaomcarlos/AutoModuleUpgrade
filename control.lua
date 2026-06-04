@@ -36,6 +36,7 @@ local function ensure_storage()
   if not storage.surface_camera_follow then storage.surface_camera_follow = {} end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   if not storage.amu_gui_locations then storage.amu_gui_locations = {} end
+  if not storage.last_scanned_planet_index then storage.last_scanned_planet_index = 0 end
 end
 
 -- Entity types that can receive quality upgrades but have no module slots
@@ -631,8 +632,12 @@ local function enqueue_scan(surface_name)
 end
 
 local function enqueue_all_scans()
+  ensure_storage()
   local added = 0
-  for _, surface_name in ipairs(PLANETS) do
+  local start_index = storage.last_scanned_planet_index or 0
+  for i = 1, #PLANETS do
+    local idx = ((start_index + i - 1) % #PLANETS) + 1
+    local surface_name = PLANETS[idx]
     if enqueue_scan(surface_name) then
       added = added + 1
     end
@@ -663,6 +668,13 @@ local function finish_scan_job(job)
     queued = job.queued,
     scanned = job.scanned
   }
+  -- Save which planet was just scanned so we resume from the next one after load
+  for i, name in ipairs(PLANETS) do
+    if name == job.surface_name then
+      storage.last_scanned_planet_index = i
+      break
+    end
+  end
   active_scan_job = nil
   if #scan_queue == 0 then
     scan_cycle_surfaces = {}
