@@ -26,6 +26,7 @@ local MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rat
 -- Planet configuration
 local PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
 local NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
+local AMU_WINDOW_NAME = "amu_scan_window"
 
 -- Entity types that can receive quality upgrades but have no module slots
 local QUALITY_UPGRADEABLE_TYPES = {
@@ -1254,8 +1255,6 @@ end)
 -- ============================================================
 -- Scan Status GUI
 -- ============================================================
-
-local AMU_WINDOW_NAME = "amu_scan_window"
 
 -- Helper: format tick delta as mm:ss
 local function format_time(ticks)
