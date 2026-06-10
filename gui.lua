@@ -13,11 +13,75 @@ end
 
 -- Helper: get valid planet sprite path
 local function get_planet_sprite(surface_name)
-  local path = "space-location/" .. surface_name
+  local path = "amu_planet_" .. surface_name
   if helpers.is_valid_sprite_path(path) then
     return path
   end
-  return "utility/questionmark"
+  return "amu_planet_nauvis"
+end
+
+local function find_child(parent, name)
+  if not parent or not parent.valid then return nil end
+  local child = parent[name]
+  if child then return child end
+  for _, nested in pairs(parent.children) do
+    child = find_child(nested, name)
+    if child then return child end
+  end
+  return nil
+end
+
+local window_width = 470
+local table_width = 452
+
+local column_widths = {
+  planet = 41,
+  queued = 50,
+  cand = 48,
+  upgraded = 60,
+  mods = 34,
+  time = 34,
+  status = 54,
+  jump = 34,
+  cam = 32
+}
+
+local function add_header_label(table_el, caption, width_key)
+  local label = table_el.add{type = "label", caption = caption, style = "amu_scan_header_label"}
+  local width = column_widths[width_key]
+  label.style.width = width
+  label.style.minimal_width = width
+  return label
+end
+
+local function add_metric_cell(table_el, row, name)
+  local cell = table_el.add{
+    type = "label",
+    name = AMU_WINDOW_NAME .. "-cell-" .. row .. "-" .. name,
+    caption = "0",
+    style = "amu_scan_cell_label"
+  }
+  local width = column_widths[name]
+  cell.style.width = width
+  cell.style.minimal_width = width
+  return cell
+end
+
+local function add_planet_cell(parent, name, sprite, tooltip)
+  local cell = parent.add{
+    type = "flow",
+    style = "amu_scan_planet_cell",
+    direction = "horizontal"
+  }
+  local planet = cell.add{
+    type = "sprite",
+    name = name,
+    sprite = sprite,
+    tooltip = tooltip,
+    style = "amu_scan_planet_sprite"
+  }
+  planet.style.size = {26, 26}
+  return planet
 end
 
 -- Create or recreate the scan status window for a player
@@ -31,9 +95,11 @@ function create_scan_window(player)
   local window = screen.add{
     type = "frame",
     name = AMU_WINDOW_NAME,
+    style = "amu_scan_window_frame",
     direction = "vertical"
   }
-  window.style.maximal_width = 720
+  window.style.width = window_width
+  window.style.minimal_width = window_width
 
   -- Title bar with drag handle and close button
   local titlebar = window.add{
@@ -46,7 +112,7 @@ function create_scan_window(player)
   titlebar.add{
     type = "label",
     caption = "AutoModuleUpgrade Scans",
-    style = "frame_title",
+    style = "amu_scan_title_label",
     ignored_by_interaction = true
   }
 
@@ -60,24 +126,30 @@ function create_scan_window(player)
 
   titlebar.add{
     type = "sprite-button",
-    sprite = "utility/show_player_names_in_map_view",
-    style = "frame_action_button",
+    sprite = "amu_title_plus_button",
+    hovered_sprite = "amu_title_plus_button",
+    clicked_sprite = "amu_title_plus_button",
+    style = "amu_scan_title_button",
     name = AMU_WINDOW_NAME .. "-eye",
     mouse_button_filter = {"left"}
   }
 
   titlebar.add{
     type = "sprite-button",
-    sprite = "utility/search_icon",
-    style = "frame_action_button",
+    sprite = "amu_title_log_button",
+    hovered_sprite = "amu_title_log_button",
+    clicked_sprite = "amu_title_log_button",
+    style = "amu_scan_title_button",
     name = AMU_WINDOW_NAME .. "-log",
     mouse_button_filter = {"left"}
   }
 
   titlebar.add{
     type = "sprite-button",
-    sprite = "utility/close",
-    style = "frame_action_button",
+    sprite = "amu_title_close_button",
+    hovered_sprite = "amu_title_close_button",
+    clicked_sprite = "amu_title_close_button",
+    style = "amu_scan_title_button",
     name = AMU_WINDOW_NAME .. "-close",
     mouse_button_filter = {"left"}
   }
@@ -86,50 +158,47 @@ function create_scan_window(player)
   local content = window.add{
     type = "frame",
     name = AMU_WINDOW_NAME .. "-content",
-    style = "inside_shallow_frame",
+    style = "amu_scan_content_frame",
     direction = "vertical"
   }
+  content.style.width = table_width
 
   local scroll = content.add{
     type = "scroll-pane",
     name = AMU_WINDOW_NAME .. "-scroll",
-    style = "naked_scroll_pane",
+    style = "amu_scan_scroll_pane",
     horizontal_scroll_policy = "never"
   }
-  scroll.style.padding = 2
+  scroll.style.width = table_width
   scroll.style.maximal_height = 300
 
-  local table_el = scroll.add{
-    type = "table",
-    name = AMU_WINDOW_NAME .. "-table",
-    column_count = 9,
-    draw_horizontal_lines = true,
-    draw_horizontal_line_after_headers = true,
-    draw_vertical_lines = false
+  local rows_flow = scroll.add{
+    type = "flow",
+    name = AMU_WINDOW_NAME .. "-rows",
+    direction = "vertical"
   }
-  table_el.style.horizontal_spacing = 8
-  table_el.style.vertical_spacing = 4
-  table_el.style.column_alignments[1] = "center"
-  table_el.style.column_alignments[2] = "right"
-  table_el.style.column_alignments[3] = "right"
-  table_el.style.column_alignments[4] = "right"
-  table_el.style.column_alignments[5] = "right"
-  table_el.style.column_alignments[6] = "right"
-  table_el.style.column_alignments[7] = "center"
-  table_el.style.column_alignments[8] = "center"
-  table_el.style.column_alignments[9] = "left"
+  rows_flow.style.width = table_width
+  rows_flow.style.vertical_spacing = 0
+
+  local header_row = rows_flow.add{
+    type = "frame",
+    name = AMU_WINDOW_NAME .. "-header-row",
+    style = "amu_scan_header_row_frame",
+    direction = "horizontal"
+  }
 
   -- Headers
-  table_el.add{type = "sprite", sprite = "space-location/nauvis", tooltip = "Planet"}.style.size = {26, 26}
-  table_el.add{type = "label", caption = "Queued", style = "bold_label"}
-  table_el.add{type = "label", caption = "Cand", style = "bold_label"}
-  table_el.add{type = "label", caption = "Upgraded", style = "bold_label"}
-  table_el.add{type = "label", caption = "Mods", style = "bold_label"}
-  local clock_header = table_el.add{type = "sprite", sprite = "utility/clock", tooltip = "Scan time / age"}
-  clock_header.style.size = {26, 26}
-  table_el.add{type = "label", caption = "Status", style = "bold_label"}
-  table_el.add{type = "label", caption = "Jump", style = "bold_label"}
-  table_el.add{type = "label", caption = "Cam", style = "bold_label"}
+  add_planet_cell(header_row, nil, "amu_planet_header", "Planet")
+  add_header_label(header_row, "Queued", "queued")
+  add_header_label(header_row, "Cand", "cand")
+  add_header_label(header_row, "Upgraded", "upgraded")
+  add_header_label(header_row, "Mods", "mods")
+  local clock_header = header_row.add{type = "sprite", sprite = "amu_clock_header", tooltip = "Scan time / age"}
+  clock_header.style.size = {23, 23}
+  clock_header.style.minimal_width = column_widths.time
+  add_header_label(header_row, "Status", "status")
+  add_header_label(header_row, "Jump", "jump")
+  add_header_label(header_row, "Cam", "cam")
 
   -- Store reference
   amu_gui_players[player.index] = {window = window, visible = true}
@@ -165,11 +234,15 @@ function update_scan_window(player)
     local eye_btn = titlebar[AMU_WINDOW_NAME .. "-eye"]
     if eye_btn and eye_btn.valid then
       if storage.global_camera_follow == true then
-        eye_btn.sprite = "utility/show_player_names_in_map_view"
+        eye_btn.sprite = "amu_title_plus_button"
+        eye_btn.hovered_sprite = "amu_title_plus_button"
+        eye_btn.clicked_sprite = "amu_title_plus_button"
         eye_btn.tooltip = "Global camera follow ON (click to use per-surface)"
         eye_btn.toggled = true
       else
-        eye_btn.sprite = "utility/cross_select"
+        eye_btn.sprite = "amu_title_plus_button"
+        eye_btn.hovered_sprite = "amu_title_plus_button"
+        eye_btn.clicked_sprite = "amu_title_plus_button"
         eye_btn.tooltip = "Global camera follow OFF — per-surface (click to force ON)"
         eye_btn.toggled = false
       end
@@ -177,78 +250,85 @@ function update_scan_window(player)
     local log_btn = titlebar[AMU_WINDOW_NAME .. "-log"]
     if log_btn and log_btn.valid then
       if storage.LOG_OVERRIDE then
-        log_btn.sprite = "utility/search_icon"
+        log_btn.sprite = "amu_title_log_button"
+        log_btn.hovered_sprite = "amu_title_log_button"
+        log_btn.clicked_sprite = "amu_title_log_button"
         log_btn.tooltip = "Logging ON (click to disable)"
         log_btn.toggled = true
       else
-        log_btn.sprite = "utility/warning"
+        log_btn.sprite = "amu_title_log_button"
+        log_btn.hovered_sprite = "amu_title_log_button"
+        log_btn.clicked_sprite = "amu_title_log_button"
         log_btn.tooltip = "Logging OFF (click to enable)"
         log_btn.toggled = false
       end
     end
   end
 
-  local table_el = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-table"]
-  if not table_el then return end
+  local rows_flow = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-rows"]
+  if not rows_flow then return end
 
-  local columns = 9
-  local header_cells = columns
-  local child_count = #table_el.children
+  local child_count = #rows_flow.children
   local current_rows = 0
-  if child_count >= header_cells then
-    current_rows = math.floor((child_count - header_cells) / columns)
+  if child_count >= 1 then
+    current_rows = child_count - 1
   end
 
   local target_rows = #PLANETS
   -- Add or remove rows to match planet count
   if current_rows < target_rows then
     for r = current_rows + 1, target_rows do
-      local surface_name = PLANETS[r]
+      local row = rows_flow.add{
+        type = "frame",
+        name = AMU_WINDOW_NAME .. "-row-" .. r,
+        style = "amu_scan_data_row_frame",
+        direction = "horizontal"
+      }
       -- Planet sprite
-      local spr = table_el.add{type = "sprite", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-planet"}
-      spr.style.size = {26, 26}
-      spr.style.stretch_image_to_widget_size = true
+      add_planet_cell(row, AMU_WINDOW_NAME .. "-cell-" .. r .. "-planet", "amu_planet_nauvis", "Planet")
       -- Queued
-      local q = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-queued", caption = "0"}
-      q.style.horizontal_align = "right"
+      add_metric_cell(row, r, "queued")
       -- Candidates
-      local c = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-cand", caption = "0"}
-      c.style.horizontal_align = "right"
+      add_metric_cell(row, r, "cand")
       -- Upgraded
-      local u = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-upgraded", caption = "0"}
-      u.style.horizontal_align = "right"
+      add_metric_cell(row, r, "upgraded")
       -- Modules
-      local m = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-mods", caption = "0"}
-      m.style.horizontal_align = "right"
+      add_metric_cell(row, r, "mods")
       -- Time / watch
-      local t = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-time", caption = ""}
-      t.style.horizontal_align = "right"
-      t.style.minimal_width = 50
+      local time_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-time", caption = "", style = "amu_scan_time_label"}
+      time_cell.style.width = column_widths.time
+      time_cell.style.minimal_width = column_widths.time
       -- Status
-      local s = table_el.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-status", caption = ""}
+      local status_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-status", caption = "", style = "amu_scan_status_label"}
+      status_cell.style.width = column_widths.status
+      status_cell.style.minimal_width = column_widths.status
       -- Jump button
-      local jump = table_el.add{
+      row.add{
         type = "sprite-button",
         name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-jump",
-        sprite = "utility/search",
+        style = "amu_scan_row_button",
+        sprite = "amu_row_search_button",
+        hovered_sprite = "amu_row_search_button",
+        clicked_sprite = "amu_row_search_button",
         tooltip = "Jump to latest upgrade",
         mouse_button_filter = {"left"}
       }
-      jump.style.size = {26, 26}
       -- Camera toggle button
-      local cam = table_el.add{
+      row.add{
         type = "sprite-button",
         name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-cam",
-        sprite = "utility/check_mark",
+        style = "amu_scan_row_button",
+        sprite = "amu_row_close_button",
+        hovered_sprite = "amu_row_close_button",
+        clicked_sprite = "amu_row_close_button",
         tooltip = "Toggle auto camera follow",
         mouse_button_filter = {"left"}
       }
-      cam.style.size = {26, 26}
     end
   elseif current_rows > target_rows then
-    local to_remove = (current_rows - target_rows) * columns
+    local to_remove = current_rows - target_rows
     for _ = 1, to_remove do
-      local children = table_el.children
+      local children = rows_flow.children
       local last = children[#children]
       if last and last.valid then last.destroy() end
     end
@@ -266,14 +346,14 @@ function update_scan_window(player)
     end
 
     -- Planet icon
-    local planet_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-planet"]
+    local planet_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-planet")
     if planet_cell and planet_cell.valid then
       planet_cell.sprite = get_planet_sprite(surface_name)
       planet_cell.tooltip = surface_name
     end
 
     -- Queued
-    local queued_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-queued"]
+    local queued_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-queued")
     if queued_cell and queued_cell.valid then
       local sq = processing_queues[surface_name]
       local queue_size = sq and #sq.queue or 0
@@ -282,14 +362,14 @@ function update_scan_window(player)
     end
 
     -- Candidates
-    local cand_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-cand"]
+    local cand_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-cand")
     if cand_cell and cand_cell.valid then
       cand_cell.caption = tostring(st.candidates or 0)
       cand_cell.tooltip = "Candidates collected"
     end
 
     -- Upgraded (buildings)
-    local upgraded_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-upgraded"]
+    local upgraded_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-upgraded")
     if upgraded_cell and upgraded_cell.valid then
       local count = storage.surface_buildings_upgraded[surface_name] or 0
       upgraded_cell.caption = tostring(count)
@@ -311,7 +391,7 @@ function update_scan_window(player)
     end
 
     -- Modules placed (grouped by category: quality / prod / speed; efficiency ignored)
-    local mods_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-mods"]
+    local mods_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-mods")
     if mods_cell and mods_cell.valid then
       local mod_stats = storage.surface_modules_placed[surface_name]
       local total = 0
@@ -353,7 +433,7 @@ function update_scan_window(player)
     end
 
     -- Time / watch (green when scanning, white when idle)
-    local time_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-time"]
+    local time_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-time")
     if time_cell and time_cell.valid then
       if is_scanning then
         time_cell.caption = format_time(elapsed)
@@ -367,7 +447,7 @@ function update_scan_window(player)
     end
 
     -- Status
-    local status_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-status"]
+    local status_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-status")
     if status_cell and status_cell.valid then
       if is_scanning then
         status_cell.caption = st.phase or "scanning"
@@ -386,23 +466,31 @@ function update_scan_window(player)
     end
 
     -- Jump button: center camera on last upgraded building
-    local jump_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-jump"]
+    local jump_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-jump")
     if jump_cell and jump_cell.valid then
       local last = storage.surface_last_upgraded[surface_name]
       if last and last.tick then
         jump_cell.enabled = true
+        jump_cell.sprite = "amu_row_search_button"
+        jump_cell.hovered_sprite = "amu_row_search_button"
+        jump_cell.clicked_sprite = "amu_row_search_button"
         jump_cell.tooltip = "Jump to last upgraded building"
       else
         jump_cell.enabled = false
+        jump_cell.sprite = "amu_row_search_disabled_button"
+        jump_cell.hovered_sprite = "amu_row_search_disabled_button"
+        jump_cell.clicked_sprite = "amu_row_search_disabled_button"
         jump_cell.tooltip = "No upgraded building yet"
       end
     end
 
-    -- Camera toggle button: shows check_mark when enabled, close when disabled
-    local cam_cell = table_el[AMU_WINDOW_NAME .. "-cell-" .. i .. "-cam"]
+    -- Camera toggle button: shows check when enabled, close when disabled
+    local cam_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-cam")
     if cam_cell and cam_cell.valid then
       local enabled = storage.surface_camera_follow[surface_name] == true
-      cam_cell.sprite = enabled and "utility/check_mark" or "utility/close"
+      cam_cell.sprite = "amu_row_close_button"
+      cam_cell.hovered_sprite = "amu_row_close_button"
+      cam_cell.clicked_sprite = "amu_row_close_button"
       cam_cell.tooltip = enabled and "Auto camera follow ON (click to disable)" or "Auto camera follow OFF (click to enable)"
     end
   end

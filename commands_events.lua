@@ -13,6 +13,8 @@ script.on_configuration_changed(function()
   storage.surface_module_upgrades = storage.surface_module_upgrades or {}
   storage.surface_last_upgraded = storage.surface_last_upgraded or {}
   storage.surface_camera_follow = storage.surface_camera_follow or {}
+  storage.pending_replacements = storage.pending_replacements or {}
+  pending_replacements = storage.pending_replacements
   if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   storage.amu_gui_locations = storage.amu_gui_locations or {}
@@ -37,6 +39,12 @@ script.on_init(function()
   storage.global_camera_follow = nil
   storage.LOG_OVERRIDE = false
   storage.amu_gui_locations = {}
+  storage.pending_replacements = {}
+  pending_replacements = storage.pending_replacements
+end)
+
+script.on_load(function()
+  pending_replacements = storage.pending_replacements or {}
 end)
 
 -- ============================================================

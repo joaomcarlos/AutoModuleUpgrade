@@ -80,7 +80,7 @@ end
 -- Returns: "upgrade", "fill", "none", or "skip" (plus optional info string)
 function check_building(entity, context)
   if not entity.valid then return "skip", "invalid" end
-  if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() then return "skip", "ghost/decon" end
+  if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return "skip", "ghost/decon/upgrade" end
   local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
   if not logistic_network then return "none", "no logistic network" end
 
@@ -264,22 +264,25 @@ end
 
 -- Attempt to defer a building for quality upgrade; returns true if deferred
 -- Uses order_upgrade so the building stays functional until bots replace it
-function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations)
+function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations, modules_already_reserved)
   local target_quality = get_next_building_quality(entity)
   if not target_quality then return false end
+  if entity.to_be_upgraded() then return false end
   local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
   if not network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
     return false end
   local saved_pf = get_products_finished(entity)
-  local upgrade_ok = pcall(function()
-    entity.order_upgrade{
+  local upgrade_ok, marked = pcall(function()
+    return entity.order_upgrade{
       force = entity.force,
       target = {name = entity.name, quality = target_quality}
     }
   end)
-  if upgrade_ok then
+  if upgrade_ok and marked then
     reserve_items(reservations, entity.name, target_quality, 1)
-    reserve_module_plan_items(reservations, modules_plan)
+    if not modules_already_reserved then
+      reserve_module_plan_items(reservations, modules_plan)
+    end
     local original_quality = entity.quality and entity.quality.name or "normal"
     table.insert(pending_replacements, {
       surface_name = surface_name,

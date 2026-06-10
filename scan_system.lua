@@ -72,7 +72,7 @@ end
 
 local function is_upgrade_candidate(entity)
   if not entity.valid then return false end
-  if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() then return false end
+  if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return false end
   if entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0 then
     return true
   end
@@ -263,7 +263,7 @@ end
 local function queue_entity_from_scan(job, entity)
   local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {dry_run = true, reservations = job.reservations})
   if result == "upgrade" or result == "fill" then
-    if try_defer_quality_upgrade(entity, job.surface_name, modules_plan, removal_plan, info, job.reservations) then
+    if try_defer_quality_upgrade(entity, job.surface_name, modules_plan, removal_plan, info, job.reservations, true) then
       job.queued = job.queued + 1
       return
     end
@@ -398,7 +398,7 @@ local function step_rate_scan(job)
 
     job.tracked_list = {}
     for un, entry in pairs(building_tracker) do
-      if entry.entity and entry.entity.valid then
+      if entry.entity and entry.entity.valid and entry.entity.surface.name == job.surface_name then
         table.insert(job.tracked_list, entry)
       end
     end
@@ -480,6 +480,7 @@ end
 local function apply_building_plan(entity, modules_plan, removal_plan, info)
   ensure_storage()
   if not entity.valid then return end
+  if entity.to_be_upgraded() then return end
   local has_modules = modules_plan and next(modules_plan)
   local has_removals = removal_plan and next(removal_plan)
   if not has_modules and not has_removals then return end
