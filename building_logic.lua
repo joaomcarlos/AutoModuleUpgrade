@@ -251,6 +251,9 @@ function check_building(entity, context)
         modules = modules_plan,
         removal_plan = removal_plan
       }
+      if amu_record_changed_building then
+        amu_record_changed_building(entity)
+      end
       local surf_name = entity.surface.name
       local do_camera = storage.global_camera_follow
       if do_camera == nil then

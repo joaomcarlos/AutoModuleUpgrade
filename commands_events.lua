@@ -12,6 +12,8 @@ script.on_configuration_changed(function()
   storage.surface_building_upgrades = storage.surface_building_upgrades or {}
   storage.surface_module_upgrades = storage.surface_module_upgrades or {}
   storage.surface_last_upgraded = storage.surface_last_upgraded or {}
+  storage.surface_changed_buildings = storage.surface_changed_buildings or {}
+  storage.amu_change_highlight_objects = storage.amu_change_highlight_objects or {}
   storage.surface_camera_follow = storage.surface_camera_follow or {}
   storage.pending_replacements = storage.pending_replacements or {}
   pending_replacements = storage.pending_replacements
@@ -36,6 +38,8 @@ script.on_init(function()
   storage.surface_building_upgrades = {}
   storage.surface_module_upgrades = {}
   storage.surface_last_upgraded = {}
+  storage.surface_changed_buildings = {}
+  storage.amu_change_highlight_objects = {}
   storage.surface_camera_follow = {}
   storage.global_camera_follow = nil
   storage.LOG_OVERRIDE = false
@@ -170,11 +174,12 @@ script.on_event(defines.events.on_gui_click, function(event)
     return
   end
 
-  -- Jump button: center camera on last upgraded building for this surface
+  -- Jump button: inspect changed buildings for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$"))
     local surface_name = get_scan_window_surface_rows(event.player_index)[row]
     if not surface_name then return end
+    amu_draw_change_highlights(player, surface_name)
     local last = storage.surface_last_upgraded[surface_name]
     if last then
       player.set_controller{

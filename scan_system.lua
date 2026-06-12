@@ -896,9 +896,11 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
     modules = modules_plan,
     removal_plan = removal_plan
   }
+  amu_record_changed_building(entity)
   if DEBUG then
     game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " pf_rate=" .. format_pf_rate(entity) .. " — " .. (info or ""))
   end
+  return true
 end
 
 -- ============================================================
@@ -999,7 +1001,10 @@ function on_tick_handler()
         if task.platform_supply_required and needs_followup_supply and not platform_supply_available(e.surface, e.force, task.supply_planet_name) then
           goto skip_entity
         end
-        apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
+        local applied_followup = apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
+        if not applied_followup then
+          amu_record_changed_building(e)
+        end
         local do_camera = storage.global_camera_follow
         if do_camera == nil then
           do_camera = storage.surface_camera_follow[task.surface_name] == true

@@ -245,7 +245,7 @@ local function add_scan_data_row(rows_flow, row_index)
     sprite = "amu_row_search_button",
     hovered_sprite = "amu_row_search_button",
     clicked_sprite = "amu_row_search_button",
-    tooltip = "Jump to latest upgrade",
+    tooltip = "Inspect changed buildings",
     mouse_button_filter = {"left"}
   }
   row.add{
@@ -606,7 +606,7 @@ function update_scan_window(player)
       end
     end
 
-    -- Jump button: center camera on last upgraded building
+    -- Jump button: center camera on last upgraded building and highlight changed buildings
     local jump_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-jump")
     if jump_cell and jump_cell.valid then
       local last = storage.surface_last_upgraded[surface_name]
@@ -615,13 +615,13 @@ function update_scan_window(player)
         jump_cell.sprite = "amu_row_search_button"
         jump_cell.hovered_sprite = "amu_row_search_button"
         jump_cell.clicked_sprite = "amu_row_search_button"
-        jump_cell.tooltip = "Jump to last upgraded building"
+        jump_cell.tooltip = "Inspect changed buildings"
       else
         jump_cell.enabled = false
         jump_cell.sprite = "amu_row_search_disabled_button"
         jump_cell.hovered_sprite = "amu_row_search_disabled_button"
         jump_cell.clicked_sprite = "amu_row_search_disabled_button"
-        jump_cell.tooltip = "No upgraded building yet"
+        jump_cell.tooltip = "No changed buildings yet"
       end
     end
 
