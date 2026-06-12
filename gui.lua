@@ -11,13 +11,42 @@ local function format_time(ticks)
   return string.format("%d:%02d", minutes, seconds)
 end
 
--- Helper: get valid planet sprite path
-local function get_planet_sprite(surface_name)
+local function is_platform_surface(surface_name)
+  local surface = game.surfaces[surface_name]
+  if not surface or not surface.valid then return false end
+  local ok, platform = pcall(function() return surface.platform end)
+  return ok and platform ~= nil
+end
+
+-- Helper: get valid surface sprite path
+local function get_surface_sprite(surface_name)
+  if is_platform_surface(surface_name) then
+    if helpers.is_valid_sprite_path("entity/space-platform-hub") then
+      return "entity/space-platform-hub"
+    end
+    if helpers.is_valid_sprite_path("item/space-platform-foundation") then
+      return "item/space-platform-foundation"
+    end
+  end
   local path = "amu_planet_" .. surface_name
   if helpers.is_valid_sprite_path(path) then
     return path
   end
   return "amu_planet_nauvis"
+end
+
+local function get_surface_tooltip(surface_name)
+  local surface = game.surfaces[surface_name]
+  if not surface or not surface.valid then
+    return surface_name
+  end
+
+  local ok, platform = pcall(function() return surface.platform end)
+  if ok and platform and platform.valid then
+    return platform.name
+  end
+
+  return surface_name
 end
 
 local function find_child(parent, name)
@@ -29,6 +58,88 @@ local function find_child(parent, name)
     if child then return child end
   end
   return nil
+end
+
+local function is_scanning_surface(surface_name)
+  local st = scan_status[surface_name]
+  return st and st.current_scan_start_tick ~= nil
+end
+
+local function get_surface_change_count(surface_name)
+  ensure_storage()
+  local building_changes = storage.surface_buildings_upgraded[surface_name] or 0
+  local module_changes = 0
+  local mod_stats = storage.surface_modules_placed[surface_name]
+  if mod_stats then
+    for _, count in pairs(mod_stats) do
+      module_changes = module_changes + count
+    end
+  end
+  return building_changes + module_changes
+end
+
+local function sort_platform_surfaces_by_changes(surface_names)
+  table.sort(surface_names, function(a, b)
+    local a_changes = get_surface_change_count(a)
+    local b_changes = get_surface_change_count(b)
+    if a_changes ~= b_changes then
+      return a_changes > b_changes
+    end
+    local a_tip = get_surface_tooltip(a)
+    local b_tip = get_surface_tooltip(b)
+    return a_tip < b_tip
+  end)
+end
+
+local function get_hidden_platform_surface_names()
+  local hidden = {}
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    if is_platform_surface(surface_name) and not is_scanning_surface(surface_name) then
+      table.insert(hidden, surface_name)
+    end
+  end
+  sort_platform_surfaces_by_changes(hidden)
+  return hidden
+end
+
+local function get_platform_surface_count()
+  local count = 0
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    if is_platform_surface(surface_name) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+function get_scan_window_surface_rows(player_index)
+  ensure_storage()
+  local rows = {}
+  local active_platforms = {}
+  local hidden_platforms = get_hidden_platform_surface_names()
+  local expanded = storage.amu_hidden_station_rows_expanded[player_index] == true
+
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    if not is_platform_surface(surface_name) then
+      table.insert(rows, surface_name)
+    elseif is_scanning_surface(surface_name) then
+      table.insert(active_platforms, surface_name)
+    end
+  end
+
+  sort_platform_surfaces_by_changes(active_platforms)
+
+  for _, surface_name in ipairs(active_platforms) do
+    table.insert(rows, surface_name)
+  end
+
+  if expanded then
+    for _, surface_name in ipairs(hidden_platforms) do
+      table.insert(rows, surface_name)
+    end
+  end
+
+  return rows
 end
 
 local window_width = 470
@@ -82,6 +193,71 @@ local function add_planet_cell(parent, name, sprite, tooltip)
   }
   planet.style.size = {26, 26}
   return planet
+end
+
+local function clear_scan_rows(rows_flow)
+  while #rows_flow.children > 1 do
+    local last = rows_flow.children[#rows_flow.children]
+    if last and last.valid then
+      last.destroy()
+    end
+  end
+end
+
+local function add_hidden_platform_toggle(rows_flow, hidden_count, expanded)
+  local caption
+  if expanded then
+    caption = "Hide idle stations (" .. hidden_count .. ")"
+  else
+    caption = "Show idle stations (" .. hidden_count .. ")"
+  end
+  local toggle = rows_flow.add{
+    type = "button",
+    name = AMU_WINDOW_NAME .. "-hidden-toggle",
+    caption = caption
+  }
+  toggle.style.width = table_width
+  toggle.style.horizontal_align = "left"
+end
+
+local function add_scan_data_row(rows_flow, row_index)
+  local row = rows_flow.add{
+    type = "frame",
+    name = AMU_WINDOW_NAME .. "-row-" .. row_index,
+    style = "amu_scan_data_row_frame",
+    direction = "horizontal"
+  }
+  add_planet_cell(row, AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-planet", "amu_planet_nauvis", "Surface")
+  add_metric_cell(row, row_index, "queued")
+  add_metric_cell(row, row_index, "cand")
+  add_metric_cell(row, row_index, "upgraded")
+  add_metric_cell(row, row_index, "mods")
+  local time_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-time", caption = "", style = "amu_scan_time_label"}
+  time_cell.style.width = column_widths.time
+  time_cell.style.minimal_width = column_widths.time
+  local status_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-status", caption = "", style = "amu_scan_status_label"}
+  status_cell.style.width = column_widths.status
+  status_cell.style.minimal_width = column_widths.status
+  row.add{
+    type = "sprite-button",
+    name = AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-jump",
+    style = "amu_scan_row_button",
+    sprite = "amu_row_search_button",
+    hovered_sprite = "amu_row_search_button",
+    clicked_sprite = "amu_row_search_button",
+    tooltip = "Jump to latest upgrade",
+    mouse_button_filter = {"left"}
+  }
+  row.add{
+    type = "sprite-button",
+    name = AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-cam",
+    style = "amu_scan_row_button",
+    sprite = "amu_row_close_button",
+    hovered_sprite = "amu_row_close_button",
+    clicked_sprite = "amu_row_close_button",
+    tooltip = "Toggle auto camera follow",
+    mouse_button_filter = {"left"}
+  }
 end
 
 -- Create or recreate the scan status window for a player
@@ -188,7 +364,7 @@ function create_scan_window(player)
   }
 
   -- Headers
-  add_planet_cell(header_row, nil, "amu_planet_header", "Planet")
+  add_planet_cell(header_row, nil, "amu_planet_header", "Surface")
   add_header_label(header_row, "Queued", "queued")
   add_header_label(header_row, "Cand", "cand")
   add_header_label(header_row, "Upgraded", "upgraded")
@@ -268,74 +444,39 @@ function update_scan_window(player)
   local rows_flow = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-rows"]
   if not rows_flow then return end
 
-  local child_count = #rows_flow.children
-  local current_rows = 0
-  if child_count >= 1 then
-    current_rows = child_count - 1
+  clear_scan_rows(rows_flow)
+
+  local hidden_platforms = get_hidden_platform_surface_names()
+  local hidden_count = #hidden_platforms
+  local platform_count = get_platform_surface_count()
+  local expanded = storage.amu_hidden_station_rows_expanded[player.index] == true
+  local primary_surfaces = {}
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    if not is_platform_surface(surface_name) or is_scanning_surface(surface_name) then
+      table.insert(primary_surfaces, surface_name)
+    end
   end
 
-  local target_rows = #PLANETS
-  -- Add or remove rows to match planet count
-  if current_rows < target_rows then
-    for r = current_rows + 1, target_rows do
-      local row = rows_flow.add{
-        type = "frame",
-        name = AMU_WINDOW_NAME .. "-row-" .. r,
-        style = "amu_scan_data_row_frame",
-        direction = "horizontal"
-      }
-      -- Planet sprite
-      add_planet_cell(row, AMU_WINDOW_NAME .. "-cell-" .. r .. "-planet", "amu_planet_nauvis", "Planet")
-      -- Queued
-      add_metric_cell(row, r, "queued")
-      -- Candidates
-      add_metric_cell(row, r, "cand")
-      -- Upgraded
-      add_metric_cell(row, r, "upgraded")
-      -- Modules
-      add_metric_cell(row, r, "mods")
-      -- Time / watch
-      local time_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-time", caption = "", style = "amu_scan_time_label"}
-      time_cell.style.width = column_widths.time
-      time_cell.style.minimal_width = column_widths.time
-      -- Status
-      local status_cell = row.add{type = "label", name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-status", caption = "", style = "amu_scan_status_label"}
-      status_cell.style.width = column_widths.status
-      status_cell.style.minimal_width = column_widths.status
-      -- Jump button
-      row.add{
-        type = "sprite-button",
-        name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-jump",
-        style = "amu_scan_row_button",
-        sprite = "amu_row_search_button",
-        hovered_sprite = "amu_row_search_button",
-        clicked_sprite = "amu_row_search_button",
-        tooltip = "Jump to latest upgrade",
-        mouse_button_filter = {"left"}
-      }
-      -- Camera toggle button
-      row.add{
-        type = "sprite-button",
-        name = AMU_WINDOW_NAME .. "-cell-" .. r .. "-cam",
-        style = "amu_scan_row_button",
-        sprite = "amu_row_close_button",
-        hovered_sprite = "amu_row_close_button",
-        clicked_sprite = "amu_row_close_button",
-        tooltip = "Toggle auto camera follow",
-        mouse_button_filter = {"left"}
-      }
-    end
-  elseif current_rows > target_rows then
-    local to_remove = current_rows - target_rows
-    for _ = 1, to_remove do
-      local children = rows_flow.children
-      local last = children[#children]
-      if last and last.valid then last.destroy() end
+  local row_index = 0
+  for _ = 1, #primary_surfaces do
+    row_index = row_index + 1
+    add_scan_data_row(rows_flow, row_index)
+  end
+
+  if platform_count > 0 then
+    add_hidden_platform_toggle(rows_flow, hidden_count, expanded)
+  end
+
+  if expanded then
+    for _ = 1, hidden_count do
+      row_index = row_index + 1
+      add_scan_data_row(rows_flow, row_index)
     end
   end
 
   -- Populate rows
-  for i, surface_name in ipairs(PLANETS) do
+  local target_surfaces = get_scan_window_surface_rows(player.index)
+  for i, surface_name in ipairs(target_surfaces) do
     local st = scan_status[surface_name] or {}
     local is_scanning = st.current_scan_start_tick ~= nil
     local elapsed = 0
@@ -345,11 +486,11 @@ function update_scan_window(player)
       elapsed = game.tick - st.last_scan_tick
     end
 
-    -- Planet icon
+    -- Surface icon
     local planet_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-planet")
     if planet_cell and planet_cell.valid then
-      planet_cell.sprite = get_planet_sprite(surface_name)
-      planet_cell.tooltip = surface_name
+      planet_cell.sprite = get_surface_sprite(surface_name)
+      planet_cell.tooltip = get_surface_tooltip(surface_name)
     end
 
     -- Queued

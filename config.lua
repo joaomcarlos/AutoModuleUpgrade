@@ -29,12 +29,13 @@ MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rate-base
 
 -- Planet configuration
 PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
-NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true} -- Buildings that don't track products_finished; skip PF checks
+NO_PF_ENTITIES = {["agricultural-tower"] = true, ["beacon"] = true, ["cargo-bay"] = true} -- Buildings that don't track products_finished; skip PF checks
 AMU_WINDOW_NAME = "amu_scan_window"
 
 -- Entity types that can receive quality upgrades but have no module slots
 QUALITY_UPGRADEABLE_TYPES = {
   ["agricultural-tower"] = true,
+  ["cargo-bay"] = true,
 }
 
 -- Module-level lookup tables (rebuilt on load, not stored in storage)

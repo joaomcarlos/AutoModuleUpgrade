@@ -18,6 +18,7 @@ script.on_configuration_changed(function()
   if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   storage.amu_gui_locations = storage.amu_gui_locations or {}
+  storage.amu_hidden_station_rows_expanded = storage.amu_hidden_station_rows_expanded or {}
   -- Destroy any stale windows so they get recreated with new layout
   for _, player in pairs(game.players) do
     if player.gui.screen[AMU_WINDOW_NAME] then
@@ -39,6 +40,7 @@ script.on_init(function()
   storage.global_camera_follow = nil
   storage.LOG_OVERRIDE = false
   storage.amu_gui_locations = {}
+  storage.amu_hidden_station_rows_expanded = {}
   storage.pending_replacements = {}
   pending_replacements = storage.pending_replacements
 end)
@@ -52,7 +54,7 @@ end)
 -- ============================================================
 
 -- Manual test command: type /amu-test in console
-commands.add_command("amu-test", "Manually trigger AutoModuleUpgrade queue refill for all planets", function()
+commands.add_command("amu-test", "Manually trigger AutoModuleUpgrade queue refill for all enabled scan targets", function()
   local added = enqueue_all_scans()
   game.print("[AutoModuleUpgrade] Manual test scheduled " .. added .. " incremental scan(s).")
 end)
@@ -65,7 +67,9 @@ commands.add_command("amu-hover", "Check module upgrades for currently selected 
     player.print("[AutoModuleUpgrade] No entity selected. Look at a building and try again.")
     return
   end
-  if not entity.prototype or not entity.prototype.module_inventory_size or entity.prototype.module_inventory_size <= 0 then
+  local has_module_slots = entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0
+  local can_quality_upgrade = QUALITY_UPGRADEABLE_TYPES[entity.type] and get_next_building_quality(entity)
+  if not has_module_slots and not can_quality_upgrade then
     player.print("[AutoModuleUpgrade] " .. entity.name .. " has no module slots.")
     return
   end
@@ -90,6 +94,10 @@ script.on_nth_tick(6, on_tick_handler)
 -- Schedule incremental queue refills every SCAN_INTERVAL ticks
 script.on_nth_tick(SCAN_INTERVAL, function()
   enqueue_all_scans()
+end)
+
+script.on_event(defines.events.on_space_platform_changed_state, function(event)
+  enqueue_platform_scan_for_platform(event.platform)
 end)
 
 -- Auto-apply on crosshair select when HOVER_APPLY is enabled
@@ -156,10 +164,17 @@ script.on_event(defines.events.on_gui_click, function(event)
     return
   end
 
+  if name == AMU_WINDOW_NAME .. "-hidden-toggle" then
+    storage.amu_hidden_station_rows_expanded[event.player_index] = not (storage.amu_hidden_station_rows_expanded[event.player_index] == true)
+    update_scan_window(player)
+    return
+  end
+
   -- Jump button: center camera on last upgraded building for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$"))
-    local surface_name = PLANETS[row]
+    local surface_name = get_scan_window_surface_rows(event.player_index)[row]
+    if not surface_name then return end
     local last = storage.surface_last_upgraded[surface_name]
     if last then
       player.set_controller{
@@ -175,7 +190,8 @@ script.on_event(defines.events.on_gui_click, function(event)
   -- Camera toggle button: enable/disable auto-follow for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$"))
-    local surface_name = PLANETS[row]
+    local surface_name = get_scan_window_surface_rows(event.player_index)[row]
+    if not surface_name then return end
     local current = storage.surface_camera_follow[surface_name] == true
     storage.surface_camera_follow[surface_name] = not current
     update_scan_window(player)

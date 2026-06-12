@@ -67,6 +67,19 @@ local function create_insert_proxy(entity, requests)
   }
 end
 
+local function get_entity_supply_network(entity, context)
+  if context and context.logistic_network ~= nil then
+    return context.logistic_network
+  end
+  if amu_get_surface_platform_supply_network then
+    local platform_network = amu_get_surface_platform_supply_network(entity.surface, entity.force)
+    if platform_network then
+      return platform_network
+    end
+  end
+  return entity.surface.find_logistic_network_by_position(entity.position, entity.force)
+end
+
 -- Get the next higher quality level for a building (e.g. epic -> legendary)
 function get_next_building_quality(entity)
   if not entity.quality then return nil end
@@ -81,7 +94,7 @@ end
 function check_building(entity, context)
   if not entity.valid then return "skip", "invalid" end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return "skip", "ghost/decon/upgrade" end
-  local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
+  local logistic_network = get_entity_supply_network(entity, context)
   if not logistic_network then return "none", "no logistic network" end
 
   local reservations = context and context.reservations or nil
@@ -204,7 +217,7 @@ function check_building(entity, context)
     if target_quality and network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
       local info_str = "quality -> " .. target_quality
       if not (context and context.dry_run) then
-        if try_defer_quality_upgrade(entity, entity.surface.name, modules_plan, removal_plan, info_str, reservations) then
+        if try_defer_quality_upgrade(entity, entity.surface.name, modules_plan, removal_plan, info_str, reservations, nil, logistic_network) then
           return "upgrade", info_str, modules_plan, removal_plan
         end
       end
@@ -264,13 +277,18 @@ end
 
 -- Attempt to defer a building for quality upgrade; returns true if deferred
 -- Uses order_upgrade so the building stays functional until bots replace it
-function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations, modules_already_reserved)
+function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_plan, info, reservations, modules_already_reserved, supply_network, supply_planet_name)
   local target_quality = get_next_building_quality(entity)
   if not target_quality then return false end
   if entity.to_be_upgraded() then return false end
-  local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
+  local logistic_network = supply_network or get_entity_supply_network(entity)
   if not network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
     return false end
+  local platform_supply_required = false
+  if type(logistic_network) == "table" and logistic_network.amu_is_platform_supply_pool then
+    platform_supply_required = true
+    supply_planet_name = supply_planet_name or logistic_network.amu_supply_planet_name
+  end
   local saved_pf = get_products_finished(entity)
   local upgrade_ok, marked = pcall(function()
     return entity.order_upgrade{
@@ -295,7 +313,9 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
       removal_plan = removal_plan,
       info = info,
       tick_queued = game.tick,
-      original_unit_number = entity.unit_number
+      original_unit_number = entity.unit_number,
+      platform_supply_required = platform_supply_required,
+      supply_planet_name = supply_planet_name
     })
     if DEBUG then
       game.print("[AutoModuleUpgrade] [DEFER] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " -> " .. target_quality .. " (pf_rate=" .. format_pf_rate(entity) .. ")")
