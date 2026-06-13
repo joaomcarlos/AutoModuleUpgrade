@@ -20,7 +20,6 @@ script.on_configuration_changed(function()
   if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   storage.amu_gui_locations = storage.amu_gui_locations or {}
-  storage.amu_hidden_station_rows_expanded = storage.amu_hidden_station_rows_expanded or {}
   -- Destroy any stale windows so they get recreated with new layout
   for _, player in pairs(game.players) do
     if player.gui.screen[AMU_WINDOW_NAME] then
@@ -44,7 +43,6 @@ script.on_init(function()
   storage.global_camera_follow = nil
   storage.LOG_OVERRIDE = false
   storage.amu_gui_locations = {}
-  storage.amu_hidden_station_rows_expanded = {}
   storage.pending_replacements = {}
   pending_replacements = storage.pending_replacements
 end)
@@ -168,16 +166,10 @@ script.on_event(defines.events.on_gui_click, function(event)
     return
   end
 
-  if name == AMU_WINDOW_NAME .. "-hidden-toggle" then
-    storage.amu_hidden_station_rows_expanded[event.player_index] = not (storage.amu_hidden_station_rows_expanded[event.player_index] == true)
-    update_scan_window(player)
-    return
-  end
-
   -- Jump button: inspect changed buildings for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$"))
-    local surface_name = get_scan_window_surface_rows(event.player_index)[row]
+    local surface_name = get_scan_window_surface_rows()[row]
     if not surface_name then return end
     amu_draw_change_highlights(player, surface_name)
     local last = storage.surface_last_upgraded[surface_name]
@@ -195,7 +187,7 @@ script.on_event(defines.events.on_gui_click, function(event)
   -- Camera toggle button: enable/disable auto-follow for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-cam$"))
-    local surface_name = get_scan_window_surface_rows(event.player_index)[row]
+    local surface_name = get_scan_window_surface_rows()[row]
     if not surface_name then return end
     local current = storage.surface_camera_follow[surface_name] == true
     storage.surface_camera_follow[surface_name] = not current

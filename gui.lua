@@ -91,33 +91,21 @@ local function sort_platform_surfaces_by_changes(surface_names)
   end)
 end
 
-local function get_hidden_platform_surface_names()
-  local hidden = {}
+local function get_idle_platform_surface_names()
+  local idle = {}
   for _, surface_name in ipairs(get_scan_surface_names()) do
     if is_platform_surface(surface_name) and not is_scanning_surface(surface_name) then
-      table.insert(hidden, surface_name)
+      table.insert(idle, surface_name)
     end
   end
-  sort_platform_surfaces_by_changes(hidden)
-  return hidden
+  sort_platform_surfaces_by_changes(idle)
+  return idle
 end
 
-local function get_platform_surface_count()
-  local count = 0
-  for _, surface_name in ipairs(get_scan_surface_names()) do
-    if is_platform_surface(surface_name) then
-      count = count + 1
-    end
-  end
-  return count
-end
-
-function get_scan_window_surface_rows(player_index)
-  ensure_storage()
+function get_scan_window_surface_rows()
   local rows = {}
   local active_platforms = {}
-  local hidden_platforms = get_hidden_platform_surface_names()
-  local expanded = storage.amu_hidden_station_rows_expanded[player_index] == true
+  local idle_platforms = get_idle_platform_surface_names()
 
   for _, surface_name in ipairs(get_scan_surface_names()) do
     if not is_platform_surface(surface_name) then
@@ -133,10 +121,8 @@ function get_scan_window_surface_rows(player_index)
     table.insert(rows, surface_name)
   end
 
-  if expanded then
-    for _, surface_name in ipairs(hidden_platforms) do
-      table.insert(rows, surface_name)
-    end
+  for _, surface_name in ipairs(idle_platforms) do
+    table.insert(rows, surface_name)
   end
 
   return rows
@@ -202,22 +188,6 @@ local function clear_scan_rows(rows_flow)
       last.destroy()
     end
   end
-end
-
-local function add_hidden_platform_toggle(rows_flow, hidden_count, expanded)
-  local caption
-  if expanded then
-    caption = "Hide idle stations (" .. hidden_count .. ")"
-  else
-    caption = "Show idle stations (" .. hidden_count .. ")"
-  end
-  local toggle = rows_flow.add{
-    type = "button",
-    name = AMU_WINDOW_NAME .. "-hidden-toggle",
-    caption = caption
-  }
-  toggle.style.width = table_width
-  toggle.style.horizontal_align = "left"
 end
 
 local function add_scan_data_row(rows_flow, row_index)
@@ -446,36 +416,12 @@ function update_scan_window(player)
 
   clear_scan_rows(rows_flow)
 
-  local hidden_platforms = get_hidden_platform_surface_names()
-  local hidden_count = #hidden_platforms
-  local platform_count = get_platform_surface_count()
-  local expanded = storage.amu_hidden_station_rows_expanded[player.index] == true
-  local primary_surfaces = {}
-  for _, surface_name in ipairs(get_scan_surface_names()) do
-    if not is_platform_surface(surface_name) or is_scanning_surface(surface_name) then
-      table.insert(primary_surfaces, surface_name)
-    end
-  end
-
-  local row_index = 0
-  for _ = 1, #primary_surfaces do
-    row_index = row_index + 1
+  local target_surfaces = get_scan_window_surface_rows()
+  for row_index = 1, #target_surfaces do
     add_scan_data_row(rows_flow, row_index)
   end
 
-  if platform_count > 0 then
-    add_hidden_platform_toggle(rows_flow, hidden_count, expanded)
-  end
-
-  if expanded then
-    for _ = 1, hidden_count do
-      row_index = row_index + 1
-      add_scan_data_row(rows_flow, row_index)
-    end
-  end
-
   -- Populate rows
-  local target_surfaces = get_scan_window_surface_rows(player.index)
   for i, surface_name in ipairs(target_surfaces) do
     local st = scan_status[surface_name] or {}
     local is_scanning = st.current_scan_start_tick ~= nil

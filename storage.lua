@@ -12,7 +12,6 @@ function ensure_storage()
   if not storage.surface_camera_follow then storage.surface_camera_follow = {} end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   if not storage.amu_gui_locations then storage.amu_gui_locations = {} end
-  if not storage.amu_hidden_station_rows_expanded then storage.amu_hidden_station_rows_expanded = {} end
   if not storage.last_scanned_planet_index then storage.last_scanned_planet_index = 0 end
   if not storage.pending_replacements then storage.pending_replacements = {} end
   pending_replacements = storage.pending_replacements
