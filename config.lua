@@ -15,17 +15,16 @@ MIN_READINGS = 2 -- Minimum pf snapshots before rate-based sorting kicks in (onl
 
 -- Scan configuration
 UPS = 60 -- Game updates per second
-SCAN_INTERVAL_SEC = 30 -- Seconds between scans
-SCAN_INTERVAL = SCAN_INTERVAL_SEC * UPS -- Ticks between scans
--- 16 aggressive, 4 conservative
-SCAN_CHUNKS_PER_STEP = 4 -- Max chunks scanned per scheduler step
--- 100 aggresive, 25 conservative
-SCAN_ENTITIES_PER_STEP = 25 -- Max candidate buildings evaluated per scheduler step
+SCAN_INTERVAL_SEC = 120 -- Seconds between scans
+SCAN_SCHEDULER_INTERVAL = 12 -- Ticks between scan/queue scheduler updates
+-- 16 aggressive, 1 conservative
+SCAN_CHUNKS_PER_STEP = 1 -- Max chunks scanned per scheduler step
+-- 100 aggressive, 8 conservative
+SCAN_ENTITIES_PER_STEP = 8 -- Max candidate buildings evaluated per scheduler step
 
 -- Priority configuration
 MIN_PF_DIFF = 15 -- Minimum production rate in items per minute to be eligible for rate-priority queuing
-QUEUE_SIZE_PER_PLANET = 100 -- Max buildings queued per surface per scan
-MAX_TRACKED_PER_PLANET = 1000 -- Max buildings tracked per surface for rate-based priority
+QUEUE_SIZE_PER_PLANET = 40 -- Max buildings queued per surface per scan
 
 -- Planet configuration
 PLANETS = {"nauvis", "vulcanus", "gleba", "fulgora", "aquilo"}
@@ -43,5 +42,11 @@ QUALITY_UPGRADEABLE_TYPES = {
 -- Module-level lookup tables (rebuilt on load, not stored in storage)
 module_tiers = {}
 module_categories = {}
+module_candidates = {}
+scan_candidate_entity_names = {}
+scan_module_entity_name_set = {}
+scan_quality_entity_name_set = {}
 quality_order = {"normal", "uncommon", "rare", "epic", "legendary"}
 quality_index = {normal = 1, uncommon = 2, rare = 3, epic = 4, legendary = 5}
+GUI_UPDATE_INTERVAL = UPS
+DEFERRED_REPLACEMENT_CHECK_INTERVAL = UPS

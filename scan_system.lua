@@ -39,7 +39,7 @@ end
 processing_queues = {} -- surface_name -> {queue = {}, batch_upgraded = 0, batch_filled = 0}
 
 -- Building tracker: unit_number -> {entity, pf_history, tick_history, last_diff, modules_plan, removal_plan, info}
--- Tracks up to 1000 buildings; after 3 pf reads, sorts by diff for priority queuing
+-- Tracks buildings with actionable work; after multiple pf reads, sorts by diff for priority queuing
 building_tracker = {}
 
 -- Pending building quality replacements: buildings marked for deconstruction + ghost placed
@@ -63,6 +63,10 @@ amu_gui_players = {}
 
 local SCAN_PLANETS_SETTING = "amu-scan-planets"
 local SCAN_SPACE_PLATFORMS_SETTING = "amu-scan-space-platforms"
+local SCAN_INTERVAL_SETTING = "amu-scan-interval-seconds"
+local SCAN_CHUNKS_SETTING = "amu-scan-chunks-per-step"
+local SCAN_ENTITIES_SETTING = "amu-scan-entities-per-step"
+local QUEUE_SIZE_SETTING = "amu-queue-size-per-surface"
 
 local function setting_enabled(name, default_value)
   if not settings or not settings.global or not settings.global[name] then
@@ -71,12 +75,39 @@ local function setting_enabled(name, default_value)
   return settings.global[name].value == true
 end
 
+local function setting_int(name, default_value)
+  if not settings or not settings.global or not settings.global[name] then
+    return default_value
+  end
+  local value = settings.global[name].value
+  if type(value) ~= "number" then
+    return default_value
+  end
+  return math.floor(value)
+end
+
 function amu_scan_planets_enabled()
   return setting_enabled(SCAN_PLANETS_SETTING, true)
 end
 
 function amu_scan_space_platforms_enabled()
   return setting_enabled(SCAN_SPACE_PLATFORMS_SETTING, true)
+end
+
+function amu_scan_interval_ticks()
+  return math.max(UPS, setting_int(SCAN_INTERVAL_SETTING, SCAN_INTERVAL_SEC) * UPS)
+end
+
+local function amu_scan_chunks_per_step()
+  return math.max(1, setting_int(SCAN_CHUNKS_SETTING, SCAN_CHUNKS_PER_STEP))
+end
+
+local function amu_scan_entities_per_step()
+  return math.max(1, setting_int(SCAN_ENTITIES_SETTING, SCAN_ENTITIES_PER_STEP))
+end
+
+local function amu_queue_size_per_surface()
+  return math.max(1, setting_int(QUEUE_SIZE_SETTING, QUEUE_SIZE_PER_PLANET))
 end
 
 local function get_force_name(force)
@@ -281,9 +312,73 @@ local function should_skip_rate_priority(entity)
   return NO_PF_ENTITIES[entity.name] or QUALITY_UPGRADEABLE_TYPES[entity.type] == true
 end
 
+local RATE_MIN_PRODUCTS = 50
+
+local function update_rate_candidate(job, entity)
+  if not entity.valid then return end
+  if entity.item_request_proxy and entity.item_request_proxy.valid then
+    job.skipped_proxy = job.skipped_proxy + 1
+    return
+  end
+
+  local un = entity.unit_number
+  if not un then return end
+
+  local pf = get_products_finished(entity)
+  local skip_pf_check = should_skip_rate_priority(entity)
+  if not skip_pf_check and pf < RATE_MIN_PRODUCTS then
+    job.skipped_low_pf = job.skipped_low_pf + 1
+    return
+  end
+
+  local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {dry_run = true, logistic_network = job.logistic_network})
+  if result == "upgrade" or result == "fill" then
+    local entry = building_tracker[un]
+    if entry then
+      table.insert(entry.pf_history, pf)
+      table.insert(entry.tick_history, job.current_tick)
+      if #entry.pf_history > 5 then
+        table.remove(entry.pf_history, 1)
+        table.remove(entry.tick_history, 1)
+      end
+      local n = #entry.pf_history
+      if n >= 2 then
+        entry.last_diff = entry.pf_history[n] - entry.pf_history[n - 1]
+      end
+      entry.entity = entity
+      entry.modules_plan = modules_plan
+      entry.removal_plan = removal_plan
+      entry.info = info
+      entry.module_upgrades = module_upgrade_details
+    else
+      building_tracker[un] = {
+        entity = entity,
+        pf_history = {pf},
+        tick_history = {job.current_tick},
+        last_diff = 0,
+        modules_plan = modules_plan,
+        removal_plan = removal_plan,
+        info = info,
+        module_upgrades = module_upgrade_details
+      }
+    end
+    job.scanned = job.scanned + 1
+  else
+    job.skipped_no_work = job.skipped_no_work + 1
+    building_tracker[un] = nil
+  end
+end
+
 local function is_upgrade_candidate(entity)
   if not entity.valid then return false end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return false end
+  local entity_name = entity.name
+  if scan_module_entity_name_set[entity_name] then
+    return true
+  end
+  if scan_quality_entity_name_set[entity_name] and get_next_building_quality(entity) then
+    return true
+  end
   if entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0 then
     return true
   end
@@ -383,7 +478,7 @@ local function finish_scan_job(job)
     last_scan_tick = game.tick,
     current_scan_start_tick = nil,
     phase = "idle",
-    candidates = job.all_entities and #job.all_entities or 0,
+    candidates = job.candidates_seen or (job.all_entities and #job.all_entities or 0),
     queued = job.queued,
     scanned = job.scanned
   }
@@ -466,12 +561,16 @@ local function create_scan_job(surface_name, context)
     surface = context.surface,
     chunk_iterator = context.surface.get_chunks(),
     force_names = context.force_names,
+    force_filter = #context.force_names == 1 and context.force_names[1] or context.force_names,
     logistic_network = context.logistic_network,
     is_space_platform = context.is_space_platform,
     supply_planet_name = context.supply_planet_name,
     phase = "collect",
     mode = USE_ABSOLUTE_PF and "absolute" or (USE_RATE_PRIORITY and "rate" or "direct"),
     all_entities = {},
+    pending_entities = nil,
+    pending_index = 1,
+    candidates_seen = 0,
     index = 1,
     queued = 0,
     reservations = reservations,
@@ -537,43 +636,75 @@ local function start_next_platform_scan_job()
 end
 
 local function step_scan_collect(job)
-  local chunks_scanned = 0
+  if not scan_candidate_entity_names or #scan_candidate_entity_names == 0 then
+    finish_scan_job(job)
+    return
+  end
 
-  while chunks_scanned < SCAN_CHUNKS_PER_STEP do
-    local ok, chunk = pcall(job.chunk_iterator)
-    if not ok or not chunk then
-      if #job.all_entities == 0 then
-        finish_scan_job(job)
+  local chunks_scanned = 0
+  local entities_processed = 0
+  local max_chunks = amu_scan_chunks_per_step()
+  local max_entities = amu_scan_entities_per_step()
+
+  while entities_processed < max_entities do
+    if job.pending_entities and job.pending_index <= #job.pending_entities then
+      local entity = job.pending_entities[job.pending_index]
+      job.pending_index = job.pending_index + 1
+      entities_processed = entities_processed + 1
+
+      if is_upgrade_candidate(entity) then
+        job.candidates_seen = job.candidates_seen + 1
+        if job.mode == "rate" then
+          update_rate_candidate(job, entity)
+        else
+          table.insert(job.all_entities, entity)
+        end
+      end
+    else
+      job.pending_entities = nil
+      job.pending_index = 1
+
+      if chunks_scanned >= max_chunks then
+        break
+      end
+
+      local ok, chunk = pcall(job.chunk_iterator)
+      if not ok or not chunk then
+        if job.mode == "rate" then
+          if job.candidates_seen == 0 then
+            finish_scan_job(job)
+            return
+          end
+          job.phase = "prepare_tracked_queue"
+        else
+          if #job.all_entities == 0 then
+            finish_scan_job(job)
+            return
+          end
+          job.phase = "evaluate"
+          job.index = 1
+        end
+        if DEBUG then
+          local first_ent = job.all_entities[1]
+          local top_rate = first_ent and format_pf_rate(first_ent) or "n/a"
+          game.print("[AutoModuleUpgrade] [SCAN] Collected " .. job.candidates_seen .. " candidates for " .. job.surface_name .. " top_pf_rate=" .. top_rate)
+        end
         return
       end
 
-      table.sort(job.all_entities, function(a, b)
-        return get_products_finished(a) > get_products_finished(b)
-      end)
-
-      job.phase = "evaluate"
-      job.index = 1
-      if DEBUG then
-        local first_ent = job.all_entities[1]
-        local top_rate = first_ent and format_pf_rate(first_ent) or "n/a"
-        game.print("[AutoModuleUpgrade] [SCAN] Collected " .. #job.all_entities .. " candidates for " .. job.surface_name .. " top_pf_rate=" .. top_rate)
-      end
-      return
+      job.pending_entities = job.surface.find_entities_filtered{
+        area = chunk.area,
+        force = job.force_filter,
+        name = scan_candidate_entity_names,
+        to_be_deconstructed = false,
+        to_be_upgraded = false
+      }
+      chunks_scanned = chunks_scanned + 1
     end
-
-    if job.surface.is_chunk_generated({chunk.x, chunk.y}) then
-      for _, force_name in ipairs(job.force_names) do
-        for _, entity in pairs(job.surface.find_entities_filtered{area = chunk.area, force = force_name}) do
-          if is_upgrade_candidate(entity) then
-            table.insert(job.all_entities, entity)
-          end
-        end
-      end
-    end
-    chunks_scanned = chunks_scanned + 1
   end
+
   local st = scan_status[job.surface_name]
-  if st then st.candidates = #job.all_entities end
+  if st then st.candidates = job.candidates_seen; st.scanned = job.scanned end
 end
 
 local function queue_entity_from_scan(job, entity)
@@ -602,9 +733,11 @@ end
 
 local function step_absolute_or_direct_scan(job)
   local processed = 0
+  local max_entities = amu_scan_entities_per_step()
+  local max_queue = amu_queue_size_per_surface()
 
-  while processed < SCAN_ENTITIES_PER_STEP and job.index <= #job.all_entities do
-    if job.queued >= QUEUE_SIZE_PER_PLANET then
+  while processed < max_entities and job.index <= #job.all_entities do
+    if job.queued >= max_queue then
       finish_scan_job(job)
       return
     end
@@ -626,73 +759,15 @@ local function step_absolute_or_direct_scan(job)
 end
 
 local function step_rate_scan(job)
-  local MIN_PRODUCTS = 50
-
   if job.phase == "evaluate" then
     local processed = 0
-    while processed < SCAN_ENTITIES_PER_STEP and job.index <= #job.all_entities do
-      if job.scanned >= MAX_TRACKED_PER_PLANET then
-        job.phase = "prepare_tracked_queue"
-        return
-      end
-
+    local max_entities = amu_scan_entities_per_step()
+    while processed < max_entities and job.index <= #job.all_entities do
       local entity = job.all_entities[job.index]
       job.index = job.index + 1
       processed = processed + 1
 
-      if not entity.valid then goto rate_continue end
-      if entity.item_request_proxy and entity.item_request_proxy.valid then
-        job.skipped_proxy = job.skipped_proxy + 1
-        goto rate_continue
-      end
-
-      local un = entity.unit_number
-      if not un then goto rate_continue end
-
-      local pf = get_products_finished(entity)
-      local skip_pf_check = should_skip_rate_priority(entity)
-      if not skip_pf_check and pf < MIN_PRODUCTS then
-        job.skipped_low_pf = job.skipped_low_pf + 1
-        goto rate_continue
-      end
-
-      local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {dry_run = true, logistic_network = job.logistic_network})
-      if result == "upgrade" or result == "fill" then
-        local entry = building_tracker[un]
-        if entry then
-          table.insert(entry.pf_history, pf)
-          table.insert(entry.tick_history, job.current_tick)
-          if #entry.pf_history > 5 then
-            table.remove(entry.pf_history, 1)
-            table.remove(entry.tick_history, 1)
-          end
-          local n = #entry.pf_history
-          if n >= 2 then
-            entry.last_diff = entry.pf_history[n] - entry.pf_history[n - 1]
-          end
-          entry.entity = entity
-          entry.modules_plan = modules_plan
-          entry.removal_plan = removal_plan
-          entry.info = info
-          entry.module_upgrades = module_upgrade_details
-        else
-          building_tracker[un] = {
-            entity = entity,
-            pf_history = {pf},
-            tick_history = {job.current_tick},
-            last_diff = 0,
-            modules_plan = modules_plan,
-            removal_plan = removal_plan,
-            info = info,
-            module_upgrades = module_upgrade_details
-          }
-        end
-        job.scanned = job.scanned + 1
-      else
-        job.skipped_no_work = job.skipped_no_work + 1
-        building_tracker[un] = nil
-      end
-      ::rate_continue::
+      update_rate_candidate(job, entity)
     end
 
     if job.index > #job.all_entities then
@@ -705,12 +780,7 @@ local function step_rate_scan(job)
 
   if job.phase == "prepare_tracked_queue" then
     local st = scan_status[job.surface_name]
-    if st then st.phase = job.phase; st.candidates = #job.all_entities end
-    if DEBUG then
-      local first_ent = job.all_entities[1]
-      local top_rate = first_ent and format_pf_rate(first_ent) or "n/a"
-      game.print("[AutoModuleUpgrade] [DIAG] total=" .. #job.all_entities .. " top_pf_rate=" .. top_rate .. " proxy=" .. job.skipped_proxy .. " low_pf=" .. job.skipped_low_pf .. " no_work=" .. job.skipped_no_work .. " tracked=" .. job.scanned)
-    end
+    if st then st.phase = job.phase; st.candidates = job.candidates_seen end
 
     for un, entry in pairs(building_tracker) do
       if not entry.entity or not entry.entity.valid then
@@ -743,6 +813,12 @@ local function step_rate_scan(job)
       end
     end)
 
+    if DEBUG then
+      local first_entry = job.tracked_list[1]
+      local top_rate = first_entry and first_entry.entity and format_pf_rate(first_entry.entity) or "n/a"
+      game.print("[AutoModuleUpgrade] [DIAG] total=" .. job.candidates_seen .. " top_pf_rate=" .. top_rate .. " proxy=" .. job.skipped_proxy .. " low_pf=" .. job.skipped_low_pf .. " no_work=" .. job.skipped_no_work .. " tracked=" .. job.scanned)
+    end
+
     job.phase = "queue_tracked"
     job.index = 1
     return
@@ -750,8 +826,10 @@ local function step_rate_scan(job)
 
   if job.phase == "queue_tracked" then
     local processed = 0
-    while processed < SCAN_ENTITIES_PER_STEP and job.index <= #job.tracked_list do
-      if job.queued >= QUEUE_SIZE_PER_PLANET then
+    local max_entities = amu_scan_entities_per_step()
+    local max_queue = amu_queue_size_per_surface()
+    while processed < max_entities and job.index <= #job.tracked_list do
+      if job.queued >= max_queue then
         finish_scan_job(job)
         return
       end
@@ -968,6 +1046,11 @@ function on_tick_handler()
   -- Process pending building quality replacements
   for i = #pending_replacements, 1, -1 do
     local task = pending_replacements[i]
+    if task.next_check_tick and game.tick < task.next_check_tick then
+      goto next_deferred
+    end
+    task.next_check_tick = game.tick + DEFERRED_REPLACEMENT_CHECK_INTERVAL
+
     if game.tick - task.tick_queued > DEFERRED_MAX_AGE then
       table.remove(pending_replacements, i)
       goto next_deferred
@@ -1035,21 +1118,23 @@ function on_tick_handler()
 
   step_scan_scheduler()
 
-  -- Re-sync GUI tracking after save/load (windows persist but local vars don't)
-  for _, player in pairs(game.connected_players) do
-    local window = player.gui.screen[AMU_WINDOW_NAME]
-    if window and window.valid then
-      if not amu_gui_players[player.index] then
-        amu_gui_players[player.index] = {window = window, visible = window.visible}
+  if game.tick % (GUI_UPDATE_INTERVAL or 60) == 0 then
+    -- Re-sync GUI tracking after save/load (windows persist but local vars don't)
+    for _, player in pairs(game.connected_players) do
+      local window = player.gui.screen[AMU_WINDOW_NAME]
+      if window and window.valid then
+        if not amu_gui_players[player.index] then
+          amu_gui_players[player.index] = {window = window, visible = window.visible}
+        end
       end
     end
-  end
 
-  -- Refresh scan status GUI for any players with the window open
-  for _, player in pairs(game.connected_players) do
-    local gui_data = amu_gui_players[player.index]
-    if gui_data and gui_data.visible then
-      update_scan_window(player)
+    -- Refresh scan status GUI for any players with the window open
+    for _, player in pairs(game.connected_players) do
+      local gui_data = amu_gui_players[player.index]
+      if gui_data and gui_data.visible then
+        update_scan_window(player)
+      end
     end
   end
 end

@@ -20,6 +20,7 @@ script.on_configuration_changed(function()
   if storage.global_camera_follow == nil then storage.global_camera_follow = nil end
   if storage.LOG_OVERRIDE == nil then storage.LOG_OVERRIDE = false end
   storage.amu_gui_locations = storage.amu_gui_locations or {}
+  storage.last_auto_scan_tick = storage.last_auto_scan_tick or 0
   -- Destroy any stale windows so they get recreated with new layout
   for _, player in pairs(game.players) do
     if player.gui.screen[AMU_WINDOW_NAME] then
@@ -44,6 +45,7 @@ script.on_init(function()
   storage.LOG_OVERRIDE = false
   storage.amu_gui_locations = {}
   storage.pending_replacements = {}
+  storage.last_auto_scan_tick = 0
   pending_replacements = storage.pending_replacements
 end)
 
@@ -90,12 +92,17 @@ commands.add_command("amu-hover", "Check module upgrades for currently selected 
   end
 end)
 
--- Process one building every 6 ticks (10 per second at 60 UPS)
-script.on_nth_tick(6, on_tick_handler)
+-- Process queued work and scan slices at a fixed low-frequency cadence.
+script.on_nth_tick(SCAN_SCHEDULER_INTERVAL, on_tick_handler)
 
--- Schedule incremental queue refills every SCAN_INTERVAL ticks
-script.on_nth_tick(SCAN_INTERVAL, function()
-  enqueue_all_scans()
+-- Poll once per second so runtime scan interval changes apply without reloading.
+script.on_nth_tick(UPS, function(event)
+  ensure_storage()
+  local last_tick = storage.last_auto_scan_tick or 0
+  if event.tick - last_tick >= amu_scan_interval_ticks() then
+    storage.last_auto_scan_tick = event.tick
+    enqueue_all_scans()
+  end
 end)
 
 script.on_event(defines.events.on_space_platform_changed_state, function(event)

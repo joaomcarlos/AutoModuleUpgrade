@@ -316,6 +316,7 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
       removal_plan = removal_plan,
       info = info,
       tick_queued = game.tick,
+      next_check_tick = game.tick + DEFERRED_REPLACEMENT_CHECK_INTERVAL,
       original_unit_number = entity.unit_number,
       platform_supply_required = platform_supply_required,
       supply_planet_name = supply_planet_name

@@ -2,17 +2,87 @@
 -- Module Lookup System
 -- ============================================================
 
--- Build lookup tables from item prototypes
+local function build_scan_candidate_entity_lookups()
+  scan_candidate_entity_names = {}
+  scan_module_entity_name_set = {}
+  scan_quality_entity_name_set = {}
+
+  for name, proto in pairs(prototypes.entity) do
+    local has_module_slots = proto.module_inventory_size and proto.module_inventory_size > 0
+    local can_quality_upgrade = QUALITY_UPGRADEABLE_TYPES[proto.type] == true
+    if has_module_slots or can_quality_upgrade then
+      table.insert(scan_candidate_entity_names, name)
+      if has_module_slots then
+        scan_module_entity_name_set[name] = true
+      end
+      if can_quality_upgrade then
+        scan_quality_entity_name_set[name] = true
+      end
+    end
+  end
+
+  table.sort(scan_candidate_entity_names)
+end
+
+local function add_module_candidate(category, name, quality, tier, score)
+  if not module_candidates[category] then
+    module_candidates[category] = {}
+  end
+  table.insert(module_candidates[category], {
+    name = name,
+    quality = quality,
+    tier = tier,
+    qidx = quality_index[quality] or 0,
+    score = score or 0
+  })
+end
+
+local function sort_module_candidates()
+  for category, candidates in pairs(module_candidates) do
+    if category == "quality" then
+      table.sort(candidates, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        if a.qidx ~= b.qidx then return a.qidx > b.qidx end
+        return a.name < b.name
+      end)
+    else
+      table.sort(candidates, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        if a.qidx ~= b.qidx then return a.qidx > b.qidx end
+        return a.name < b.name
+      end)
+    end
+  end
+end
+
+-- Build lookup tables from prototypes
 -- Uses LuaItemPrototype.category and LuaItemPrototype.tier (official API)
 function build_module_lookups()
   module_tiers = {}
   module_categories = {}
+  module_candidates = {}
   for name, proto in pairs(prototypes.item) do
     if proto.module_effects and proto.category and proto.tier then
+      local category = proto.category
+      local tier = proto.tier
       module_tiers[name] = proto.tier
-      module_categories[name] = proto.category
+      module_categories[name] = category
+
+      for qname, qproto in pairs(prototypes.quality) do
+        if category == "quality" then
+          local quality_effect = proto.module_effects.quality
+          if quality_effect then
+            add_module_candidate(category, name, qname, tier, quality_effect * qproto.default_multiplier)
+          end
+        else
+          add_module_candidate(category, name, qname, tier)
+        end
+      end
     end
   end
+  sort_module_candidates()
+  build_scan_candidate_entity_lookups()
 end
 
 -- Helpers for tracking network reservations during a scan
@@ -44,47 +114,19 @@ end
 
 -- Power-score-based search for quality modules
 local function find_quality_module_upgrade(module_name, module_quality, logistic_network, reservations)
-  local current_tier = module_tiers[module_name]
-  if not current_tier then return nil, nil end
-
   local proto = prototypes.item[module_name]
   if not proto then return nil, nil end
 
-  -- Extract quality bonus from module_effects table: {quality = 0.01}
-  local base_effect = 0
-  if proto.module_effects and proto.module_effects.quality then
-    base_effect = proto.module_effects.quality
-  end
+  local base_effect = proto.module_effects and proto.module_effects.quality
+  if not base_effect then return nil, nil end
 
   local current_q = prototypes.quality[module_quality]
   local current_score = base_effect * (current_q and current_q.default_multiplier or 1)
 
-  -- Collect all better quality-module variants
-  local candidates = {}
-  for name, tier in pairs(module_tiers) do
-    if module_categories[name] == "quality" then
-      local p = prototypes.item[name]
-      if p and p.module_effects and p.module_effects.quality then
-        local be = p.module_effects.quality
-        for qname, qproto in pairs(prototypes.quality) do
-          local score = be * qproto.default_multiplier
-          if score > current_score then
-            table.insert(candidates, {
-              name = name,
-              quality = qname,
-              score = score
-            })
-          end
-        end
-      end
+  for _, cand in ipairs(module_candidates.quality or {}) do
+    if cand.score <= current_score then
+      return nil, nil
     end
-  end
-
-  -- Sort by score descending (best first)
-  table.sort(candidates, function(a, b) return a.score > b.score end)
-
-  -- Return first available in network
-  for _, cand in ipairs(candidates) do
     if network_has_items(logistic_network, cand.name, cand.quality, 1, reservations) then
       return cand.name, cand.quality
     end
@@ -137,47 +179,11 @@ end
 -- needed_count: how many items are required (defaults to 1)
 function find_best_available(category, logistic_network, reservations, needed_count)
   needed_count = needed_count or 1
-  local best = nil
-
-  if category == "quality" then
-    -- Power-score based for quality modules
-    local best_score = -1
-    for name, tier in pairs(module_tiers) do
-      if module_categories[name] == "quality" then
-        local p = prototypes.item[name]
-        if p and p.module_effects and p.module_effects.quality then
-          local be = p.module_effects.quality
-          for qname, qproto in pairs(prototypes.quality) do
-            if network_has_items(logistic_network, name, qname, needed_count, reservations) then
-              local score = be * qproto.default_multiplier
-              if score > best_score then
-                best = {name = name, quality = qname}
-                best_score = score
-              end
-            end
-          end
-        end
-      end
-    end
-  else
-    -- Tier-first for speed/efficiency/productivity
-    local best_tier = 0
-    local best_qidx = 0
-    for name, tier in pairs(module_tiers) do
-      if module_categories[name] == category then
-        for qname, qproto in pairs(prototypes.quality) do
-          if network_has_items(logistic_network, name, qname, needed_count, reservations) then
-            local qidx = quality_index[qname] or 0
-            if tier > best_tier or (tier == best_tier and qidx > best_qidx) then
-              best_tier = tier
-              best_qidx = qidx
-              best = {name = name, quality = qname}
-            end
-          end
-        end
-      end
+  for _, cand in ipairs(module_candidates[category] or {}) do
+    if network_has_items(logistic_network, cand.name, cand.quality, needed_count, reservations) then
+      return {name = cand.name, quality = cand.quality}
     end
   end
 
-  return best
+  return nil
 end

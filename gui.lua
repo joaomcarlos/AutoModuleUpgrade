@@ -181,15 +181,6 @@ local function add_planet_cell(parent, name, sprite, tooltip)
   return planet
 end
 
-local function clear_scan_rows(rows_flow)
-  while #rows_flow.children > 1 do
-    local last = rows_flow.children[#rows_flow.children]
-    if last and last.valid then
-      last.destroy()
-    end
-  end
-end
-
 local function add_scan_data_row(rows_flow, row_index)
   local row = rows_flow.add{
     type = "frame",
@@ -228,6 +219,21 @@ local function add_scan_data_row(rows_flow, row_index)
     tooltip = "Toggle auto camera follow",
     mouse_button_filter = {"left"}
   }
+end
+
+local function sync_scan_rows(rows_flow, target_count)
+  local existing_count = #rows_flow.children - 1
+  while existing_count > target_count do
+    local last = rows_flow.children[#rows_flow.children]
+    if last and last.valid then
+      last.destroy()
+    end
+    existing_count = existing_count - 1
+  end
+
+  for row_index = existing_count + 1, target_count do
+    add_scan_data_row(rows_flow, row_index)
+  end
 end
 
 -- Create or recreate the scan status window for a player
@@ -414,16 +420,14 @@ function update_scan_window(player)
   local rows_flow = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-rows"]
   if not rows_flow then return end
 
-  clear_scan_rows(rows_flow)
-
   local target_surfaces = get_scan_window_surface_rows()
-  for row_index = 1, #target_surfaces do
-    add_scan_data_row(rows_flow, row_index)
-  end
+  sync_scan_rows(rows_flow, #target_surfaces)
 
   -- Populate rows
   for i, surface_name in ipairs(target_surfaces) do
     local st = scan_status[surface_name] or {}
+    local surface = game.surfaces[surface_name]
+    local surface_available = surface and surface.valid
     local is_scanning = st.current_scan_start_tick ~= nil
     local elapsed = 0
     if is_scanning then
@@ -452,7 +456,7 @@ function update_scan_window(player)
     local cand_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-cand")
     if cand_cell and cand_cell.valid then
       cand_cell.caption = tostring(st.candidates or 0)
-      cand_cell.tooltip = "Candidates collected"
+      cand_cell.tooltip = surface_available and "Candidates collected" or "Surface does not exist yet"
     end
 
     -- Upgraded (buildings)
@@ -536,7 +540,10 @@ function update_scan_window(player)
     -- Status
     local status_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-status")
     if status_cell and status_cell.valid then
-      if is_scanning then
+      if not surface_available then
+        status_cell.caption = "no surface"
+        status_cell.tooltip = surface_name .. " is not available yet, so scans are skipped"
+      elseif is_scanning then
         status_cell.caption = st.phase or "scanning"
         status_cell.tooltip = "Currently scanning"
       else
