@@ -377,6 +377,22 @@ script.on_event(defines.events.on_gui_click, function(event)
     return
   end
 
+  if name == AMU_WINDOW_NAME .. "-dump" then
+    amu_open_performance_dump_window(player)
+    return
+  end
+
+  if name == AMU_DUMP_WINDOW_NAME .. "-refresh" then
+    amu_refresh_performance_dump_window(player)
+    return
+  end
+
+  if name == AMU_DUMP_WINDOW_NAME .. "-close" then
+    local window = player.gui.screen[AMU_DUMP_WINDOW_NAME]
+    if window and window.valid then window.destroy() end
+    return
+  end
+
   -- Jump button: inspect changed buildings for this surface
   if name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$") then
     local row = tonumber(name:match(AMU_WINDOW_NAME .. "%-cell%-(%d+)%-jump$"))

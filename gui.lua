@@ -49,6 +49,183 @@ local function get_surface_tooltip(surface_name)
   return surface_name
 end
 
+local function count_valid_registered_entities(surface_name)
+  local count = 0
+  local registry = storage.amu_candidate_registry and storage.amu_candidate_registry[surface_name]
+  if not registry then return 0 end
+  for _, entity in pairs(registry) do
+    if entity and entity.valid then count = count + 1 end
+  end
+  return count
+end
+
+local function total_registered_entities()
+  ensure_storage()
+  local total = 0
+  for surface_name, _ in pairs(storage.amu_candidate_registry or {}) do
+    total = total + count_valid_registered_entities(surface_name)
+  end
+  return total
+end
+
+local function total_queued_plans()
+  local total = 0
+  for _, sq in pairs(processing_queues or {}) do
+    total = total + #(sq.queue or {})
+  end
+  return total
+end
+
+local function total_tracker_entities()
+  local total = 0
+  for _, entry in pairs(building_tracker or {}) do
+    if entry and entry.entity and entry.entity.valid then total = total + 1 end
+  end
+  return total
+end
+
+local function safe_surface_setting(surface_name, map)
+  return map and map[surface_name] == true and "true" or "false"
+end
+
+local function dump_setting(name, fallback)
+  if settings and settings.global and settings.global[name] then
+    return tostring(settings.global[name].value)
+  end
+  return tostring(fallback)
+end
+
+local function dump_surface_line(index, surface_name)
+  local st = scan_status[surface_name] or {}
+  local diagnostics = storage.amu_diagnostics[surface_name] or {}
+  local sq = processing_queues[surface_name]
+  local queue_size = sq and #sq.queue or 0
+  local last_scan_age = st.last_scan_tick and (game.tick - st.last_scan_tick) or -1
+  local current_scan_age = st.current_scan_start_tick and (game.tick - st.current_scan_start_tick) or -1
+  return string.format(
+    "%02d. %s | queued=%d | candidates=%d | scanned=%d | registered=%d | paused=%s | camera=%s | last_phase=%s | last_scan_age_ticks=%d | current_scan_age_ticks=%d | diag_proxy=%d | diag_low_pf=%d | diag_no_work=%d | diag_excluded=%d | registry_only=%s",
+    index,
+    surface_name,
+    queue_size,
+    st.candidates or 0,
+    st.scanned or 0,
+    count_valid_registered_entities(surface_name),
+    safe_surface_setting(surface_name, storage.amu_surface_paused),
+    safe_surface_setting(surface_name, storage.surface_camera_follow),
+    tostring(st.phase or "idle"),
+    last_scan_age,
+    current_scan_age,
+    diagnostics.skipped_proxy or 0,
+    diagnostics.skipped_low_pf or 0,
+    diagnostics.skipped_no_work or 0,
+    diagnostics.skipped_excluded or 0,
+    diagnostics.registry_only and "true" or "false"
+  )
+end
+
+function amu_build_performance_dump()
+  ensure_storage()
+  local lines = {}
+  local surfaces = get_scan_surface_names()
+
+  table.insert(lines, "AutoModuleUpgrade performance dump")
+  table.insert(lines, "Generated at tick: " .. tostring(game.tick))
+  table.insert(lines, "")
+  table.insert(lines, "[settings]")
+  table.insert(lines, "scan_planets=" .. dump_setting("amu-scan-planets", true))
+  table.insert(lines, "scan_space_platforms=" .. dump_setting("amu-scan-space-platforms", true))
+  table.insert(lines, "scan_interval_seconds=" .. dump_setting("amu-scan-interval-seconds", SCAN_INTERVAL_SEC))
+  table.insert(lines, "scan_chunks_per_step=" .. dump_setting("amu-scan-chunks-per-step", SCAN_CHUNKS_PER_STEP))
+  table.insert(lines, "scan_entities_per_step=" .. dump_setting("amu-scan-entities-per-step", SCAN_ENTITIES_PER_STEP))
+  table.insert(lines, "queue_size_per_surface=" .. dump_setting("amu-queue-size-per-surface", QUEUE_SIZE_PER_PLANET))
+  table.insert(lines, "optimize_productivity_cap=" .. dump_setting(AMU_OPTIMIZE_PRODUCTIVITY_SETTING, true))
+  table.insert(lines, "")
+  table.insert(lines, "[totals]")
+  table.insert(lines, "surfaces=" .. tostring(#surfaces))
+  table.insert(lines, "registered_entities=" .. tostring(total_registered_entities()))
+  table.insert(lines, "queued_plans=" .. tostring(total_queued_plans()))
+  table.insert(lines, "pending_quality_upgrades=" .. tostring(#(pending_replacements or {})))
+  table.insert(lines, "tracked_entities=" .. tostring(total_tracker_entities()))
+  table.insert(lines, "global_camera_follow=" .. tostring(storage.global_camera_follow == true))
+  table.insert(lines, "log_override=" .. tostring(storage.LOG_OVERRIDE == true))
+  table.insert(lines, "")
+  table.insert(lines, "[surfaces]")
+  for index, surface_name in ipairs(surfaces) do
+    table.insert(lines, dump_surface_line(index, surface_name))
+  end
+  table.insert(lines, "")
+  table.insert(lines, "[notes]")
+  table.insert(lines, "diag_proxy = skipped because an item-request-proxy already existed")
+  table.insert(lines, "diag_low_pf = skipped by rate-priority threshold")
+  table.insert(lines, "diag_no_work = evaluated but no valid work was found")
+  table.insert(lines, "diag_excluded = skipped because the entity was explicitly excluded")
+  table.insert(lines, "registry_only = scan used the event-maintained registry instead of a full chunk walk")
+
+  return table.concat(lines, "\n")
+end
+
+function amu_open_performance_dump_window(player)
+  if not player or not player.valid then return end
+  local screen = player.gui.screen
+  local existing = screen[AMU_DUMP_WINDOW_NAME]
+  if existing and existing.valid then existing.destroy() end
+
+  local frame = screen.add{
+    type = "frame",
+    name = AMU_DUMP_WINDOW_NAME,
+    direction = "vertical",
+    caption = {"amu-gui.dump-window-title"}
+  }
+  frame.style.width = 900
+  frame.style.maximal_height = 700
+  frame.auto_center = true
+
+  local controls = frame.add{type = "flow", direction = "horizontal"}
+  controls.add{
+    type = "button",
+    name = AMU_DUMP_WINDOW_NAME .. "-refresh",
+    caption = {"amu-gui.dump-refresh"}
+  }
+  controls.add{
+    type = "button",
+    name = AMU_DUMP_WINDOW_NAME .. "-close",
+    caption = {"amu-gui.dump-close"}
+  }
+
+  local help = frame.add{
+    type = "label",
+    caption = {"amu-gui.dump-help"}
+  }
+  help.style.single_line = false
+
+  local textbox = frame.add{
+    type = "text-box",
+    name = AMU_DUMP_WINDOW_NAME .. "-textbox",
+    text = amu_build_performance_dump()
+  }
+  textbox.style.width = 860
+  textbox.style.height = 560
+  textbox.word_wrap = false
+  textbox.clear_and_focus_on_right_click = false
+  textbox.select_all()
+  player.opened = textbox
+end
+
+function amu_refresh_performance_dump_window(player)
+  if not player or not player.valid then return end
+  local window = player.gui.screen[AMU_DUMP_WINDOW_NAME]
+  if not window or not window.valid then
+    amu_open_performance_dump_window(player)
+    return
+  end
+  local textbox = window[AMU_DUMP_WINDOW_NAME .. "-textbox"]
+  if textbox and textbox.valid then
+    textbox.text = amu_build_performance_dump()
+    textbox.select_all()
+    player.opened = textbox
+  end
+end
+
 local function find_child(parent, name)
   if not parent or not parent.valid then return nil end
   local child = parent[name]
@@ -275,6 +452,15 @@ function create_scan_window(player)
   }
   dragger.style.horizontally_stretchable = true
   dragger.style.vertically_stretchable = true
+
+  titlebar.add{
+    type = "button",
+    name = AMU_WINDOW_NAME .. "-dump",
+    caption = {"amu-gui.dump-button"},
+    tooltip = {"amu-gui.dump-tooltip"},
+    style = "tool_button",
+    mouse_button_filter = {"left"}
+  }
 
   titlebar.add{
     type = "sprite-button",

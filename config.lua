@@ -36,6 +36,7 @@ NO_PF_ENTITY_TYPES = {
   ["mining-drill"] = true,
 }
 AMU_WINDOW_NAME = "amu_scan_window"
+AMU_DUMP_WINDOW_NAME = "amu_performance_dump_window"
 AMU_CHANGE_HIGHLIGHT_TICKS = 15 * UPS
 AMU_CHANGE_HIGHLIGHT_PADDING = 0.15
 
