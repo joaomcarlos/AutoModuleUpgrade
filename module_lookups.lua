@@ -8,8 +8,9 @@ local function build_scan_candidate_entity_lookups()
   scan_quality_entity_name_set = {}
 
   for name, proto in pairs(prototypes.entity) do
-    local has_module_slots = proto.module_inventory_size and proto.module_inventory_size > 0
-    local can_quality_upgrade = QUALITY_UPGRADEABLE_TYPES[proto.type] == true
+    local has_module_slots = (proto.module_inventory_size and proto.module_inventory_size > 0)
+      or proto.quality_affects_module_slots == true
+    local can_quality_upgrade = amu_can_quality_upgrade_prototype(proto)
     if has_module_slots or can_quality_upgrade then
       table.insert(scan_candidate_entity_names, name)
       if has_module_slots then
@@ -22,6 +23,24 @@ local function build_scan_candidate_entity_lookups()
   end
 
   table.sort(scan_candidate_entity_names)
+end
+
+local function build_quality_lookups()
+  quality_order = {}
+  quality_index = {}
+  local qualities = {}
+  for name, proto in pairs(prototypes.quality) do
+    table.insert(qualities, {name = name, level = proto.level or 0, order = proto.order or name})
+  end
+  table.sort(qualities, function(a, b)
+    if a.level ~= b.level then return a.level < b.level end
+    if a.order ~= b.order then return a.order < b.order end
+    return a.name < b.name
+  end)
+  for index, quality in ipairs(qualities) do
+    quality_order[index] = quality.name
+    quality_index[quality.name] = index
+  end
 end
 
 local function add_module_candidate(category, name, quality, tier, score)
@@ -37,47 +56,44 @@ local function add_module_candidate(category, name, quality, tier, score)
   })
 end
 
+local function module_objective_score(category, effects, tier, qidx)
+  if category == "speed" then return effects and effects.speed or 0 end
+  if category == "productivity" then return effects and effects.productivity or 0 end
+  if category == "quality" then return effects and effects.quality or 0 end
+  if category == "efficiency" then return -(effects and effects.consumption or 0) end
+  -- Unknown modded categories retain deterministic tier/quality ordering.
+  return (tier or 0) * 1000 + (qidx or 0)
+end
+
 local function sort_module_candidates()
-  for category, candidates in pairs(module_candidates) do
-    if category == "quality" then
-      table.sort(candidates, function(a, b)
-        if a.score ~= b.score then return a.score > b.score end
-        if a.tier ~= b.tier then return a.tier > b.tier end
-        if a.qidx ~= b.qidx then return a.qidx > b.qidx end
-        return a.name < b.name
-      end)
-    else
-      table.sort(candidates, function(a, b)
-        if a.tier ~= b.tier then return a.tier > b.tier end
-        if a.qidx ~= b.qidx then return a.qidx > b.qidx end
-        return a.name < b.name
-      end)
-    end
+  for _, candidates in pairs(module_candidates) do
+    table.sort(candidates, function(a, b)
+      if a.score ~= b.score then return a.score > b.score end
+      if a.tier ~= b.tier then return a.tier > b.tier end
+      if a.qidx ~= b.qidx then return a.qidx > b.qidx end
+      return a.name < b.name
+    end)
   end
 end
 
 -- Build lookup tables from prototypes
 -- Uses LuaItemPrototype.category and LuaItemPrototype.tier (official API)
 function build_module_lookups()
+  build_quality_lookups()
   module_tiers = {}
   module_categories = {}
   module_candidates = {}
   for name, proto in pairs(prototypes.item) do
-    if proto.module_effects and proto.category and proto.tier then
+    if not proto.hidden and proto.module_effects and proto.category and proto.tier then
       local category = proto.category
       local tier = proto.tier
       module_tiers[name] = proto.tier
       module_categories[name] = category
 
-      for qname, qproto in pairs(prototypes.quality) do
-        if category == "quality" then
-          local quality_effect = proto.module_effects.quality
-          if quality_effect then
-            add_module_candidate(category, name, qname, tier, quality_effect * qproto.default_multiplier)
-          end
-        else
-          add_module_candidate(category, name, qname, tier)
-        end
+      for qname, _ in pairs(prototypes.quality) do
+        local effects = amu_get_module_effects and amu_get_module_effects(name, qname) or proto.module_effects
+        local score = module_objective_score(category, effects, tier, quality_index[qname])
+        add_module_candidate(category, name, qname, tier, score)
       end
     end
   end
@@ -112,19 +128,15 @@ function reserve_module_plan_items(reservations, modules_plan)
   end
 end
 
--- Power-score-based search for quality modules
-local function find_quality_module_upgrade(module_name, module_quality, logistic_network, reservations)
+local function find_scored_module_upgrade(module_name, module_quality, category, logistic_network, reservations)
   local proto = prototypes.item[module_name]
   if not proto then return nil, nil end
 
-  local base_effect = proto.module_effects and proto.module_effects.quality
-  if not base_effect then return nil, nil end
+  local current_effects = amu_get_module_effects and amu_get_module_effects(module_name, module_quality) or proto.module_effects
+  local current_score = module_objective_score(category, current_effects, module_tiers[module_name], quality_index[module_quality])
 
-  local current_q = prototypes.quality[module_quality]
-  local current_score = base_effect * (current_q and current_q.default_multiplier or 1)
-
-  for _, cand in ipairs(module_candidates.quality or {}) do
-    if cand.score <= current_score then
+  for _, cand in ipairs(module_candidates[category] or {}) do
+    if cand.score <= current_score + AMU_PRODUCTIVITY_EPSILON then
       return nil, nil
     end
     if network_has_items(logistic_network, cand.name, cand.quality, 1, reservations) then
@@ -147,40 +159,17 @@ function find_upgrade(module_name, module_quality, logistic_network, reservation
     return nil, nil
   end
 
-  -- Is this a quality module? Use power-score-based search
-  if category == "quality" then
-    return find_quality_module_upgrade(module_name, module_quality, logistic_network, reservations)
-  end
-
-  -- Speed, efficiency, productivity: tier-first, then quality
-  local current_qidx = quality_index[module_quality] or 1
-
-  -- Step 1: Same tier, better quality (best to worst)
-  for qidx = 5, current_qidx + 1, -1 do
-    local qname = quality_order[qidx]
-    if network_has_items(logistic_network, module_name, qname, 1, reservations) then
-      return module_name, qname
-    end
-  end
-
-  -- Step 2: Next tier, normal quality
-  local next_tier = tier + 1
-  local next_tier_name = category .. "-module-" .. next_tier
-  if prototypes.item[next_tier_name] and network_has_items(logistic_network, next_tier_name, "normal", 1, reservations) then
-    return next_tier_name, "normal"
-  end
-
-  return nil, nil
+  return find_scored_module_upgrade(module_name, module_quality, category, logistic_network, reservations)
 end
 
 -- Find best available module of a given category for empty slots
--- For speed/efficiency/productivity: highest tier, then best quality
--- For quality modules: highest power score (quality.bonus * multiplier)
+-- Candidates are ranked by their exact quality-aware objective effect.
 -- needed_count: how many items are required (defaults to 1)
-function find_best_available(category, logistic_network, reservations, needed_count)
+function find_best_available(category, logistic_network, reservations, needed_count, entity, recipe_proto)
   needed_count = needed_count or 1
   for _, cand in ipairs(module_candidates[category] or {}) do
-    if network_has_items(logistic_network, cand.name, cand.quality, needed_count, reservations) then
+    local allowed = not entity or not amu_module_allowed or amu_module_allowed(entity, recipe_proto, cand.name)
+    if allowed and network_has_items(logistic_network, cand.name, cand.quality, needed_count, reservations) then
       return {name = cand.name, quality = cand.quality}
     end
   end

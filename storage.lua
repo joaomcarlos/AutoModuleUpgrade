@@ -15,7 +15,23 @@ function ensure_storage()
   if not storage.last_scanned_planet_index then storage.last_scanned_planet_index = 0 end
   if not storage.last_auto_scan_tick then storage.last_auto_scan_tick = 0 end
   if not storage.pending_replacements then storage.pending_replacements = {} end
+  if not storage.amu_surface_paused then storage.amu_surface_paused = {} end
+  if not storage.amu_excluded_entities then storage.amu_excluded_entities = {} end
+  if not storage.amu_candidate_registry then storage.amu_candidate_registry = {} end
+  if not storage.amu_registry_ready then storage.amu_registry_ready = {} end
+  if not storage.amu_diagnostics then storage.amu_diagnostics = {} end
   pending_replacements = storage.pending_replacements
+end
+
+function amu_entity_key(entity)
+  if not entity or not entity.valid then return nil end
+  if entity.unit_number then return tostring(entity.unit_number) end
+  return entity.surface.name .. "|" .. entity.name .. "|" .. string.format("%.2f", entity.position.x) .. "|" .. string.format("%.2f", entity.position.y)
+end
+
+function amu_entity_is_excluded(entity)
+  local key = amu_entity_key(entity)
+  return key and storage.amu_excluded_entities[key] == true or false
 end
 
 local function get_entity_change_key(entity)

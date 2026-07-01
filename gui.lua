@@ -206,8 +206,8 @@ local function add_scan_data_row(rows_flow, row_index)
     sprite = "amu_row_search_button",
     hovered_sprite = "amu_row_search_button",
     clicked_sprite = "amu_row_search_button",
-    tooltip = "Inspect changed buildings",
-    mouse_button_filter = {"left"}
+    tooltip = {"amu-gui.jump-tooltip"},
+    mouse_button_filter = {"left", "right"}
   }
   row.add{
     type = "sprite-button",
@@ -216,8 +216,8 @@ local function add_scan_data_row(rows_flow, row_index)
     sprite = "amu_row_close_button",
     hovered_sprite = "amu_row_close_button",
     clicked_sprite = "amu_row_close_button",
-    tooltip = "Toggle auto camera follow",
-    mouse_button_filter = {"left"}
+    tooltip = {"amu-gui.camera-tooltip"},
+    mouse_button_filter = {"left", "right"}
   }
 end
 
@@ -263,7 +263,7 @@ function create_scan_window(player)
 
   titlebar.add{
     type = "label",
-    caption = "AutoModuleUpgrade Scans",
+    caption = {"amu-gui.window-title"},
     style = "amu_scan_title_label",
     ignored_by_interaction = true
   }
@@ -340,17 +340,17 @@ function create_scan_window(player)
   }
 
   -- Headers
-  add_planet_cell(header_row, nil, "amu_planet_header", "Surface")
-  add_header_label(header_row, "Queued", "queued")
-  add_header_label(header_row, "Cand", "cand")
-  add_header_label(header_row, "Upgraded", "upgraded")
-  add_header_label(header_row, "Mods", "mods")
-  local clock_header = header_row.add{type = "sprite", sprite = "amu_clock_header", tooltip = "Scan time / age"}
+  add_planet_cell(header_row, nil, "amu_planet_header", {"amu-gui.surface"})
+  add_header_label(header_row, {"amu-gui.queued"}, "queued")
+  add_header_label(header_row, {"amu-gui.candidates"}, "cand")
+  add_header_label(header_row, {"amu-gui.upgraded"}, "upgraded")
+  add_header_label(header_row, {"amu-gui.modules"}, "mods")
+  local clock_header = header_row.add{type = "sprite", sprite = "amu_clock_header", tooltip = {"amu-gui.time-tooltip"}}
   clock_header.style.size = {23, 23}
   clock_header.style.minimal_width = column_widths.time
-  add_header_label(header_row, "Status", "status")
-  add_header_label(header_row, "Jump", "jump")
-  add_header_label(header_row, "Cam", "cam")
+  add_header_label(header_row, {"amu-gui.status"}, "status")
+  add_header_label(header_row, {"amu-gui.jump"}, "jump")
+  add_header_label(header_row, {"amu-gui.camera"}, "cam")
 
   -- Store reference
   amu_gui_players[player.index] = {window = window, visible = true}
@@ -389,13 +389,13 @@ function update_scan_window(player)
         eye_btn.sprite = "amu_title_plus_button"
         eye_btn.hovered_sprite = "amu_title_plus_button"
         eye_btn.clicked_sprite = "amu_title_plus_button"
-        eye_btn.tooltip = "Global camera follow ON (click to use per-surface)"
+        eye_btn.tooltip = {"amu-gui.global-camera-on"}
         eye_btn.toggled = true
       else
         eye_btn.sprite = "amu_title_plus_button"
         eye_btn.hovered_sprite = "amu_title_plus_button"
         eye_btn.clicked_sprite = "amu_title_plus_button"
-        eye_btn.tooltip = "Global camera follow OFF — per-surface (click to force ON)"
+        eye_btn.tooltip = {"amu-gui.global-camera-off"}
         eye_btn.toggled = false
       end
     end
@@ -405,13 +405,13 @@ function update_scan_window(player)
         log_btn.sprite = "amu_title_log_button"
         log_btn.hovered_sprite = "amu_title_log_button"
         log_btn.clicked_sprite = "amu_title_log_button"
-        log_btn.tooltip = "Logging ON (click to disable)"
+        log_btn.tooltip = {"amu-gui.logging-on"}
         log_btn.toggled = true
       else
         log_btn.sprite = "amu_title_log_button"
         log_btn.hovered_sprite = "amu_title_log_button"
         log_btn.clicked_sprite = "amu_title_log_button"
-        log_btn.tooltip = "Logging OFF (click to enable)"
+        log_btn.tooltip = {"amu-gui.logging-off"}
         log_btn.toggled = false
       end
     end
@@ -449,7 +449,7 @@ function update_scan_window(player)
       local sq = processing_queues[surface_name]
       local queue_size = sq and #sq.queue or 0
       queued_cell.caption = tostring(queue_size)
-      queued_cell.tooltip = "Queued: " .. queue_size
+      queued_cell.tooltip = {"amu-gui.queued-tooltip", queue_size}
     end
 
     -- Candidates
@@ -477,7 +477,7 @@ function update_scan_window(player)
         for _, item in ipairs(items) do table.insert(lines, item.text) end
         upgraded_cell.tooltip = table.concat(lines, "\n")
       else
-        upgraded_cell.tooltip = "No buildings upgraded yet"
+        upgraded_cell.tooltip = {"amu-gui.no-building-upgrades"}
       end
     end
 
@@ -519,7 +519,7 @@ function update_scan_window(player)
         table.sort(tooltip_parts)
         mods_cell.tooltip = table.concat(tooltip_parts, "\n")
       else
-        mods_cell.tooltip = "No modules placed yet"
+        mods_cell.tooltip = {"amu-gui.no-module-requests"}
       end
     end
 
@@ -529,7 +529,7 @@ function update_scan_window(player)
       if is_scanning then
         time_cell.caption = format_time(elapsed)
         time_cell.style.font_color = {r = 0.3, g = 1.0, b = 0.3} -- green
-        time_cell.tooltip = "Scanning for " .. format_time(elapsed)
+        time_cell.tooltip = {"amu-gui.scanning-for", format_time(elapsed)}
       else
         time_cell.caption = st.last_scan_tick and format_time(elapsed) or "—"
         time_cell.style.font_color = {r = 1.0, g = 1.0, b = 1.0} -- white
@@ -540,21 +540,33 @@ function update_scan_window(player)
     -- Status
     local status_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-status")
     if status_cell and status_cell.valid then
-      if not surface_available then
-        status_cell.caption = "no surface"
+      local diagnostics = storage.amu_diagnostics[surface_name] or {}
+      local diagnostic_tooltip = {
+        "amu-gui.diagnostics-tooltip",
+        diagnostics.skipped_proxy or 0,
+        diagnostics.skipped_low_pf or 0,
+        diagnostics.skipped_no_work or 0,
+        diagnostics.skipped_excluded or 0,
+        diagnostics.registry_only and "registry" or "full"
+      }
+      if storage.amu_surface_paused[surface_name] then
+        status_cell.caption = {"amu-gui.status-paused"}
+        status_cell.tooltip = diagnostic_tooltip
+      elseif not surface_available then
+        status_cell.caption = {"amu-gui.status-no-surface"}
         status_cell.tooltip = surface_name .. " is not available yet, so scans are skipped"
       elseif is_scanning then
         status_cell.caption = st.phase or "scanning"
-        status_cell.tooltip = "Currently scanning"
+        status_cell.tooltip = diagnostic_tooltip
       else
         local sq = processing_queues[surface_name]
         local queue_size = sq and #sq.queue or 0
         if queue_size > 0 then
-          status_cell.caption = "queueing"
-          status_cell.tooltip = queue_size .. " buildings queued"
+          status_cell.caption = {"amu-gui.status-queueing"}
+          status_cell.tooltip = diagnostic_tooltip
         else
-          status_cell.caption = "idle"
-          status_cell.tooltip = "Waiting for next scan"
+          status_cell.caption = {"amu-gui.status-idle"}
+          status_cell.tooltip = diagnostic_tooltip
         end
       end
     end
@@ -568,13 +580,13 @@ function update_scan_window(player)
         jump_cell.sprite = "amu_row_search_button"
         jump_cell.hovered_sprite = "amu_row_search_button"
         jump_cell.clicked_sprite = "amu_row_search_button"
-        jump_cell.tooltip = "Inspect changed buildings"
+        jump_cell.tooltip = {"amu-gui.jump-tooltip"}
       else
-        jump_cell.enabled = false
-        jump_cell.sprite = "amu_row_search_disabled_button"
-        jump_cell.hovered_sprite = "amu_row_search_disabled_button"
-        jump_cell.clicked_sprite = "amu_row_search_disabled_button"
-        jump_cell.tooltip = "No changed buildings yet"
+        jump_cell.enabled = surface_available
+        jump_cell.sprite = surface_available and "amu_row_search_button" or "amu_row_search_disabled_button"
+        jump_cell.hovered_sprite = jump_cell.sprite
+        jump_cell.clicked_sprite = jump_cell.sprite
+        jump_cell.tooltip = surface_available and {"amu-gui.rescan-only-tooltip"} or {"amu-gui.no-surface-tooltip"}
       end
     end
 
@@ -585,7 +597,7 @@ function update_scan_window(player)
       cam_cell.sprite = "amu_row_close_button"
       cam_cell.hovered_sprite = "amu_row_close_button"
       cam_cell.clicked_sprite = "amu_row_close_button"
-      cam_cell.tooltip = enabled and "Auto camera follow ON (click to disable)" or "Auto camera follow OFF (click to enable)"
+      cam_cell.tooltip = enabled and {"amu-gui.camera-on-tooltip"} or {"amu-gui.camera-off-tooltip"}
     end
   end
 end

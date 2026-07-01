@@ -49,4 +49,11 @@ data:extend({
     default_value = 40,
     order = "a[scan]-f[queue]",
   },
+  {
+    type = "bool-setting",
+    name = "amu-optimize-productivity-cap",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "b[optimization]-a[productivity-cap]",
+  },
 })

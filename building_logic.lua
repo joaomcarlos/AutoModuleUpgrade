@@ -2,71 +2,6 @@
 -- Building Evaluation & Proxy Management
 -- ============================================================
 
--- Create or update item-request-proxy
-local function create_module_proxy(entity, slot_index, old_module, old_quality, new_module, new_quality)
-  local surface = entity.surface
-  local module_inv = entity.get_module_inventory()
-  if not module_inv then return end
-
-  local inv_index = module_inv.index
-  local stack_0based = slot_index - 1
-
-  -- Remove existing proxy if any
-  if entity.item_request_proxy and entity.item_request_proxy.valid then
-    entity.item_request_proxy.destroy()
-  end
-
-  -- Create new proxy with insert + removal plan
-  local modules_plan = {
-    {
-      id = {name = new_module, quality = new_quality},
-      items = {in_inventory = {{inventory = inv_index, stack = stack_0based}}}
-    }
-  }
-
-  local removal_plan = {
-    {
-      id = {name = old_module, quality = old_quality},
-      items = {in_inventory = {{inventory = inv_index, stack = stack_0based}}}
-    }
-  }
-
-  surface.create_entity{
-    name = "item-request-proxy",
-    target = entity,
-    position = entity.position,
-    force = entity.force,
-    modules = modules_plan,
-    removal_plan = removal_plan
-  }
-end
-
--- Create insert-only proxy for empty slots
-local function create_insert_proxy(entity, requests)
-  local surface = entity.surface
-
-  -- Remove existing proxy if any
-  if entity.item_request_proxy and entity.item_request_proxy.valid then
-    entity.item_request_proxy.destroy()
-  end
-
-  local modules_plan = {}
-  for _, req in ipairs(requests) do
-    table.insert(modules_plan, {
-      id = {name = req.name, quality = req.quality},
-      items = {in_inventory = {{inventory = req.inventory, stack = req.stack}}}
-    })
-  end
-
-  surface.create_entity{
-    name = "item-request-proxy",
-    target = entity,
-    position = entity.position,
-    force = entity.force,
-    modules = modules_plan
-  }
-end
-
 local function get_entity_supply_network(entity, context)
   if context and context.logistic_network ~= nil then
     return context.logistic_network
@@ -83,10 +18,53 @@ end
 -- Get the next higher quality level for a building (e.g. epic -> legendary)
 function get_next_building_quality(entity)
   if not entity.quality then return nil end
-  local current_name = entity.quality.name
-  local idx = quality_index[current_name]
-  if not idx or idx >= #quality_order then return nil end
-  return quality_order[idx + 1]
+  local next_quality = entity.quality.next
+  return next_quality and next_quality.name or nil
+end
+
+function amu_get_entity_upgrade_item_name(entity)
+  if not entity or not entity.valid or not entity.prototype then return nil end
+  local items = entity.prototype.items_to_place_this
+  if items and items[1] and items[1].name then return items[1].name end
+  if prototypes.item[entity.name] then return entity.name end
+  return nil
+end
+
+function amu_validate_module_plan(entity, modules_plan, removal_plan)
+  if not entity or not entity.valid or entity.to_be_deconstructed() or entity.to_be_upgraded() then
+    return false, "entity-busy"
+  end
+  if entity.item_request_proxy and entity.item_request_proxy.valid then
+    return false, "existing-proxy"
+  end
+  local ok, module_inv = pcall(function() return entity.get_module_inventory() end)
+  if not ok or not module_inv then return false, "no-module-inventory" end
+
+  local removals_by_stack = {}
+  for _, request in ipairs(removal_plan or {}) do
+    local location = request.items and request.items.in_inventory and request.items.in_inventory[1]
+    if location then
+      local slot = location.stack + 1
+      removals_by_stack[slot] = true
+      local stack = module_inv[slot]
+      local quality = stack and stack.valid_for_read and stack.quality and stack.quality.name or nil
+      if not stack or not stack.valid_for_read or stack.name ~= request.id.name or quality ~= (request.id.quality or "normal") then
+        return false, "stale-removal-plan"
+      end
+    end
+  end
+
+  for _, request in ipairs(modules_plan or {}) do
+    local location = request.items and request.items.in_inventory and request.items.in_inventory[1]
+    if location then
+      local slot = location.stack + 1
+      local stack = module_inv[slot]
+      if not removals_by_stack[slot] and stack and stack.valid_for_read then
+        return false, "stale-insert-plan"
+      end
+    end
+  end
+  return true
 end
 
 -- Check a single building for upgrades/fills
@@ -94,13 +72,20 @@ end
 function check_building(entity, context)
   if not entity.valid then return "skip", "invalid" end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return "skip", "ghost/decon/upgrade" end
+  if entity.item_request_proxy and entity.item_request_proxy.valid then return "skip", "existing proxy" end
   local logistic_network = get_entity_supply_network(entity, context)
   if not logistic_network then return "none", "no logistic network" end
 
   local reservations = context and context.reservations or nil
 
-  local has_modules = entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0
-  local module_inv = has_modules and entity.get_module_inventory() or nil
+  local ok_inv, module_inv = pcall(function() return entity.get_module_inventory() end)
+  if not ok_inv then module_inv = nil end
+  local recipe = nil
+  local recipe_proto = nil
+  if entity.get_recipe then
+    local ok_recipe, value = pcall(function() return entity.get_recipe() end)
+    if ok_recipe and value then recipe = value; recipe_proto = value.prototype end
+  end
 
   local filled_slots = {}
   local empty_slots = {}
@@ -137,12 +122,59 @@ function check_building(entity, context)
   local upgrade_counts = {} -- key -> count for grouping
   local module_upgrade_details = {} -- {old_name, old_quality, new_name, new_quality}
   local fill_details = {}
+  local optimisation_details = {}
   local did_anything = false
+  local handled_slots = {}
+  local recommendation = amu_get_machine_recommendation and amu_get_machine_recommendation(entity) or nil
+
+  -- Replace only productivity that is provably above the recipe cap. This is
+  -- conservative: quality/efficiency/speed layouts remain player-owned intent.
+  local optimise_productivity = not settings.global[AMU_OPTIMIZE_PRODUCTIVITY_SETTING]
+    or settings.global[AMU_OPTIMIZE_PRODUCTIVITY_SETTING].value == true
+  if optimise_productivity and recommendation and recommendation.objective == "productivity" and recommendation.productivity_cap then
+    local remaining_productivity = recommendation.module_productivity or 0
+    local baseline = recommendation.baseline_productivity or 0
+    local cap = recommendation.productivity_cap
+    for _, slot_info in ipairs(filled_slots) do
+      if module_categories[slot_info.name] == "productivity" then
+        local effects = amu_get_module_effects(slot_info.name, slot_info.quality)
+        local slot_productivity = effects and effects.productivity or 0
+        if amu_productivity_slot_is_redundant(baseline, remaining_productivity, slot_productivity, cap) then
+          local speed = find_best_available("speed", logistic_network, reservations, 1, entity, recipe_proto)
+          if speed then
+            handled_slots[slot_info.slot] = true
+            local stack_0based = slot_info.slot - 1
+            table.insert(modules_plan, {
+              id = {name = speed.name, quality = speed.quality},
+              items = {in_inventory = {{inventory = module_inv.index, stack = stack_0based}}}
+            })
+            table.insert(removal_plan, {
+              id = {name = slot_info.name, quality = slot_info.quality},
+              items = {in_inventory = {{inventory = module_inv.index, stack = stack_0based}}}
+            })
+            table.insert(module_upgrade_details, {
+              old_name = slot_info.name,
+              old_quality = slot_info.quality,
+              new_name = speed.name,
+              new_quality = speed.quality
+            })
+            reserve_items(reservations, speed.name, speed.quality, 1)
+            remaining_productivity = remaining_productivity - slot_productivity
+            table.insert(optimisation_details, "prod cap -> speed")
+            did_anything = true
+          end
+        end
+      end
+    end
+  end
 
   -- Phase A: Upgrade existing modules
   for _, slot_info in ipairs(filled_slots) do
-    local new_name, new_quality = find_upgrade(slot_info.name, slot_info.quality, logistic_network, reservations)
-    if new_name and new_quality then
+    local new_name, new_quality = nil, nil
+    if not handled_slots[slot_info.slot] then
+      new_name, new_quality = find_upgrade(slot_info.name, slot_info.quality, logistic_network, reservations)
+    end
+    if new_name and new_quality and amu_module_allowed(entity, recipe_proto, new_name) then
       local stack_0based = slot_info.slot - 1
       table.insert(modules_plan, {
         id = {name = new_name, quality = new_quality},
@@ -169,52 +201,41 @@ function check_building(entity, context)
 
   -- Phase B: Fill empty slots
   if #empty_slots > 0 then
-    local best = nil
-    if #filled_slots > 0 then
-      -- Match category of the first existing module in this building
-      local target_category = module_categories[filled_slots[1].name] or "productivity"
-      best = find_best_available(target_category, logistic_network, reservations, #empty_slots)
-      if not best then
-        best = find_best_available("speed", logistic_network, reservations, #empty_slots)
+    local objective = recommendation and recommendation.objective or "speed"
+    local projected_productivity = recommendation
+      and ((recommendation.baseline_productivity or 0) + (recommendation.module_productivity or 0)) or 0
+    local cap = recommendation and recommendation.productivity_cap or nil
+    local fill_counts = {}
+    for _, slot in ipairs(empty_slots) do
+      local target_category = objective
+      if optimise_productivity and objective == "productivity" and cap and projected_productivity >= cap - AMU_PRODUCTIVITY_EPSILON then
+        target_category = "speed"
       end
-    else
-      -- Empty machine: prefer productivity if allowed, else speed
-      local proto = entity.prototype
-      local productivity_allowed = proto.allowed_effects and proto.allowed_effects.productivity == true
-      if productivity_allowed then
-        local recipe = entity.get_recipe and entity:get_recipe()
-        if recipe and recipe.prototype and recipe.prototype.allowed_effects then
-          if recipe.prototype.allowed_effects.productivity ~= true then
-            productivity_allowed = false
-          end
-        end
-      end
-      if productivity_allowed then
-        best = find_best_available("productivity", logistic_network, reservations, #empty_slots)
-      end
-      if not best then
-        best = find_best_available("speed", logistic_network, reservations, #empty_slots)
-      end
-    end
-    if best then
-      for _, slot in ipairs(empty_slots) do
+      local best = find_best_available(target_category, logistic_network, reservations, 1, entity, recipe_proto)
+      if best then
         table.insert(modules_plan, {
           id = {name = best.name, quality = best.quality},
           items = {in_inventory = {{inventory = module_inv.index, stack = slot - 1}}}
         })
+        reserve_items(reservations, best.name, best.quality, 1)
+        local key = best.name .. "|" .. best.quality
+        fill_counts[key] = (fill_counts[key] or 0) + 1
+        local effects = amu_get_module_effects(best.name, best.quality)
+        projected_productivity = projected_productivity + (effects and effects.productivity or 0)
+        did_anything = true
       end
-      table.insert(fill_details, abbr(best.name, best.quality) .. " x" .. #empty_slots)
-      if reservations then
-        reserve_items(reservations, best.name, best.quality, #empty_slots)
-      end
-      did_anything = true
+    end
+    for key, count in pairs(fill_counts) do
+      local name, quality = key:match("(.+)|(.+)")
+      table.insert(fill_details, abbr(name, quality) .. " x" .. count)
     end
   end
 
   if not did_anything then
     -- No module work; check if the building itself can receive a quality upgrade
     local target_quality = get_next_building_quality(entity)
-    if target_quality and network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
+    local upgrade_item_name = amu_get_entity_upgrade_item_name(entity)
+    if target_quality and upgrade_item_name and network_has_items(logistic_network, upgrade_item_name, target_quality, 1, reservations) then
       local info_str = "quality -> " .. target_quality
       if not (context and context.dry_run) then
         if try_defer_quality_upgrade(entity, entity.surface.name, modules_plan, removal_plan, info_str, reservations, nil, logistic_network) then
@@ -236,14 +257,14 @@ function check_building(entity, context)
       table.insert(parts, "upg: " .. table.concat(upg_parts, ", "))
     end
     if #fill_details > 0 then table.insert(parts, "fill: " .. table.concat(fill_details, ", ")) end
+    if #optimisation_details > 0 then table.insert(parts, "optimise: " .. table.concat(optimisation_details, ", ")) end
     local info_str = table.concat(parts, "; ")
 
     -- Create combined proxy if anything was done (skipped in dry_run mode)
     if not (context and context.dry_run) then
-      if entity.item_request_proxy and entity.item_request_proxy.valid then
-        entity.item_request_proxy.destroy()
-      end
-      entity.surface.create_entity{
+      local valid_plan = amu_validate_module_plan(entity, modules_plan, removal_plan)
+      if not valid_plan then return "skip", "plan changed before apply" end
+      local proxy = entity.surface.create_entity{
         name = "item-request-proxy",
         target = entity,
         position = entity.position,
@@ -251,6 +272,7 @@ function check_building(entity, context)
         modules = modules_plan,
         removal_plan = removal_plan
       }
+      if not proxy then return "skip", "proxy creation failed" end
       if amu_record_changed_building then
         amu_record_changed_building(entity)
       end
@@ -272,7 +294,7 @@ function check_building(entity, context)
       end
     end
 
-    return "upgrade", info_str, modules_plan, removal_plan, module_upgrade_details
+    return "upgrade", info_str, modules_plan, removal_plan, module_upgrade_details, recommendation
   end
 
   return "none", "no upgrade or fill available", nil, nil, nil
@@ -285,14 +307,15 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
   if not target_quality then return false end
   if entity.to_be_upgraded() then return false end
   local logistic_network = supply_network or get_entity_supply_network(entity)
-  if not network_has_items(logistic_network, entity.name, target_quality, 1, reservations) then
+  local upgrade_item_name = amu_get_entity_upgrade_item_name(entity)
+  if not upgrade_item_name or not network_has_items(logistic_network, upgrade_item_name, target_quality, 1, reservations) then
     return false end
   local platform_supply_required = false
   if type(logistic_network) == "table" and logistic_network.amu_is_platform_supply_pool then
     platform_supply_required = true
     supply_planet_name = supply_planet_name or logistic_network.amu_supply_planet_name
   end
-  local saved_pf = get_products_finished(entity)
+  local saved_pf, saved_pf_supported = get_products_finished(entity)
   local upgrade_ok, marked = pcall(function()
     return entity.order_upgrade{
       force = entity.force,
@@ -300,7 +323,7 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
     }
   end)
   if upgrade_ok and marked then
-    reserve_items(reservations, entity.name, target_quality, 1)
+    reserve_items(reservations, upgrade_item_name, target_quality, 1)
     if not modules_already_reserved then
       reserve_module_plan_items(reservations, modules_plan)
     end
@@ -309,9 +332,11 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
       surface_name = surface_name,
       position = entity.position,
       entity_name = entity.name,
+      upgrade_item_name = upgrade_item_name,
       original_quality = original_quality,
       target_quality = target_quality,
       saved_pf = saved_pf,
+      saved_pf_supported = saved_pf_supported,
       modules_plan = modules_plan,
       removal_plan = removal_plan,
       info = info,

@@ -1,11 +1,13 @@
+---------------------------------------------------------------------------------------------------
 Version: 1.0.0
-Date: 2026-05-31
+Date: 2026-07-01
   Features:
-    - Automatically upgrades modules in buildings every 5 minutes
-    - Prioritizes buildings by lifetime production (products_finished)
-    - Tier-first quality upgrades for speed/efficiency/productivity modules
-    - Power-score-based upgrades for quality modules
-    - Fills empty slots with matching category modules
-    - Uses item-request-proxy for atomic module swaps
-    - Per-surface building limit setting (default 1)
-    - Debug mode with camera focus and game.print messages
+    - Automatically optimizes and upgrades machine modules every 2 minutes by default
+    - Preserves quality, speed, and efficiency layouts as player intent
+    - Replaces productivity above a recipe cap with available speed modules
+    - Adds automatic quality upgrades for more support and infrastructure entities up to legendary
+    - Supports dynamic quality chains, modded module names, and all surfaces
+    - Uses an event-maintained registry after the initial incremental scan
+    - Adds area selection, exclusions, previews, per-surface pause, and rescans
+    - Protects existing request proxies and validates plans before applying them
+    - Adds diagnostics, English and Portuguese locale, Tips and Tricks, and documentation

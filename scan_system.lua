@@ -13,7 +13,7 @@ end
 
 function get_products_finished(entity)
   local ok, val = pcall(function() return entity.products_finished end)
-  return ok and val or 0
+  return ok and val or 0, ok
 end
 
 -- Format a building's production info for logging:
@@ -156,107 +156,32 @@ local function get_platform_surface(platform)
   return nil
 end
 
-local function get_platforms_orbiting_planet(planet, force_name)
-  if not planet or not force_name then return {} end
-  local ok, platforms = pcall(function() return planet.get_space_platforms(force_name) end)
-  if ok and platforms then
-    return platforms
-  end
-  return {}
-end
-
-local function make_network_pool(networks, planet_name)
-  if not networks or #networks == 0 then return nil end
+local function make_platform_hub_pool(platform)
+  if not platform or platform.valid == false then return nil end
+  local hub = platform.hub
+  if not hub or not hub.valid then return nil end
   return {
     amu_is_platform_supply_pool = true,
-    amu_supply_planet_name = planet_name,
+    amu_supply_planet_name = get_platform_location_planet_name(platform),
     get_item_count = function(item)
-      local total = 0
-      for _, network in ipairs(networks) do
-        local ok, count = pcall(function()
-          if network.valid then
-            return network.get_item_count(item)
-          end
-          return 0
-        end)
-        if ok and count then
-          total = total + count
-        end
-      end
-      return total
+      if not hub.valid then return 0 end
+      local ok, count = pcall(function() return hub.get_item_count(item) end)
+      return ok and count or 0
     end
   }
-end
-
-local function get_planet_rocket_supply_network(planet_name, force)
-  local force_name = get_force_name(force)
-  if not planet_name or not force_name then return nil end
-
-  local surface = game.surfaces[planet_name]
-  if not surface then
-    local planet = get_planet(planet_name)
-    if planet then
-      local ok, planet_surface = pcall(function() return planet.surface end)
-      if ok then surface = planet_surface end
-    end
-  end
-  if not surface or not surface.valid then return nil end
-
-  local ok, silos = pcall(function()
-    return surface.find_entities_filtered{type = "rocket-silo", force = force_name}
-  end)
-  if not ok or not silos then return nil end
-
-  local networks = {}
-  local seen = {}
-  for _, silo in ipairs(silos) do
-    if silo.valid and not silo.to_be_deconstructed() then
-      local network = surface.find_logistic_network_by_position(silo.position, force_name)
-      if network and network.valid then
-        local id = network.network_id
-        if not seen[id] then
-          seen[id] = true
-          table.insert(networks, network)
-        end
-      end
-    end
-  end
-
-  return make_network_pool(networks, planet_name)
 end
 
 function amu_get_surface_platform_supply_network(surface, force)
   if not amu_scan_space_platforms_enabled() then return nil end
   local platform = get_surface_platform(surface)
   if not platform then return nil end
-
-  local force_name = get_force_name(force)
-  if not force_name then
-    force_name = get_force_name(platform.force)
-  end
-  if not force_name then return nil end
-
-  local planet_name = get_platform_location_planet_name(platform)
-  if not planet_name then return nil end
-
-  return get_planet_rocket_supply_network(planet_name, force_name)
+  return make_platform_hub_pool(platform)
 end
 
 local function platform_supply_available(surface, force, expected_planet_name)
   local platform = get_surface_platform(surface)
-  if not platform then return true end
-  local planet_name = get_platform_location_planet_name(platform)
-  if not planet_name or (expected_planet_name and planet_name ~= expected_planet_name) then
-    return false
-  end
-  return amu_get_surface_platform_supply_network(surface, force) ~= nil
-end
-
-local function platform_still_at_planet(surface, expected_planet_name)
-  local platform = get_surface_platform(surface)
   if not platform then return false end
-  local planet_name = get_platform_location_planet_name(platform)
-  return planet_name ~= nil and planet_name == expected_planet_name
+  return amu_get_surface_platform_supply_network(surface, force) ~= nil
 end
 
 local function get_player_force_names()
@@ -274,20 +199,15 @@ end
 local function add_platform_scan_surfaces(surface_names, seen)
   if not amu_scan_space_platforms_enabled() then return end
 
-  for _, force_name in ipairs(get_player_force_names()) do
-    for _, planet_name in ipairs(PLANETS) do
-      local planet = get_planet(planet_name)
-      for _, platform in ipairs(get_platforms_orbiting_planet(planet, force_name)) do
-        local surface = get_platform_surface(platform)
-        if surface and not seen[surface.name] then
-          local scheduled = 0
-          local ok_scheduled, value = pcall(function() return platform.scheduled_for_deletion end)
-          if ok_scheduled and value then scheduled = value end
-          if scheduled == 0 then
-            seen[surface.name] = true
-            table.insert(surface_names, surface.name)
-          end
-        end
+  for _, surface in pairs(game.surfaces) do
+    local platform = get_surface_platform(surface)
+    if platform and not seen[surface.name] then
+      local scheduled = 0
+      local ok_scheduled, value = pcall(function() return platform.scheduled_for_deletion end)
+      if ok_scheduled and value then scheduled = value end
+      if scheduled == 0 then
+        seen[surface.name] = true
+        table.insert(surface_names, surface.name)
       end
     end
   end
@@ -298,18 +218,23 @@ function get_scan_surface_names()
   local seen = {}
 
   if amu_scan_planets_enabled() then
-    for _, surface_name in ipairs(PLANETS) do
-      seen[surface_name] = true
-      table.insert(surface_names, surface_name)
+    for _, surface in pairs(game.surfaces) do
+      if not get_surface_platform(surface) then
+        seen[surface.name] = true
+        table.insert(surface_names, surface.name)
+      end
     end
   end
 
   add_platform_scan_surfaces(surface_names, seen)
+  table.sort(surface_names)
   return surface_names
 end
 
 local function should_skip_rate_priority(entity)
-  return NO_PF_ENTITIES[entity.name] or QUALITY_UPGRADEABLE_TYPES[entity.type] == true
+  if NO_PF_ENTITY_TYPES[entity.type] or amu_can_quality_upgrade_entity(entity) then return true end
+  local _, supported = get_products_finished(entity)
+  return not supported
 end
 
 local RATE_MIN_PRODUCTS = 50
@@ -379,17 +304,42 @@ local function is_upgrade_candidate(entity)
   if scan_quality_entity_name_set[entity_name] and get_next_building_quality(entity) then
     return true
   end
-  if entity.prototype and entity.prototype.module_inventory_size and entity.prototype.module_inventory_size > 0 then
-    return true
-  end
+  local ok_inv, module_inv = pcall(function() return entity.get_module_inventory() end)
+  if ok_inv and module_inv and #module_inv > 0 then return true end
   -- Also include buildings that can receive a quality upgrade (e.g. agricultural tower)
-  if QUALITY_UPGRADEABLE_TYPES[entity.type] and get_next_building_quality(entity) then
+  if amu_can_quality_upgrade_entity(entity) and get_next_building_quality(entity) then
     return true
   end
   return false
 end
 
+function amu_register_candidate_entity(entity)
+  if not entity or not entity.valid or not is_upgrade_candidate(entity) then return false end
+  ensure_storage()
+  local surface_name = entity.surface.name
+  storage.amu_candidate_registry[surface_name] = storage.amu_candidate_registry[surface_name] or {}
+  local key = amu_entity_key(entity)
+  if not key then return false end
+  storage.amu_candidate_registry[surface_name][key] = entity
+  return true
+end
+
+function amu_unregister_candidate_entity(entity)
+  -- Destruction events normally expose a valid entity. If another mod raises a
+  -- late destroy event, leave the stale reference for the next registry sweep.
+  if not entity or not entity.valid then return end
+  ensure_storage()
+  local surface_name = entity.surface.name
+  local key = entity.unit_number and tostring(entity.unit_number) or amu_entity_key(entity)
+  if surface_name and key and storage.amu_candidate_registry[surface_name] then
+    storage.amu_candidate_registry[surface_name][key] = nil
+  end
+  if key then storage.amu_excluded_entities[key] = nil end
+end
+
 local function enqueue_scan(surface_name)
+  ensure_storage()
+  if storage.amu_surface_paused[surface_name] then return false end
   if active_scan_job and active_scan_job.surface_name == surface_name then
     return false
   end
@@ -409,6 +359,8 @@ local function enqueue_scan(surface_name)
 end
 
 local function enqueue_platform_scan(surface_name)
+  ensure_storage()
+  if storage.amu_surface_paused[surface_name] then return false end
   if not amu_scan_space_platforms_enabled() then
     return false
   end
@@ -429,7 +381,6 @@ end
 
 function enqueue_platform_scan_for_platform(platform)
   if not amu_scan_space_platforms_enabled() then return false end
-  if not get_platform_location_planet_name(platform) then return false end
   local surface = get_platform_surface(platform)
   if not surface then return false end
   return enqueue_platform_scan(surface.name)
@@ -438,25 +389,27 @@ end
 function enqueue_all_scans()
   ensure_storage()
   local added = 0
-  if amu_scan_planets_enabled() then
-    local start_index = storage.last_scanned_planet_index or 0
-    for i = 1, #PLANETS do
-      local idx = ((start_index + i - 1) % #PLANETS) + 1
-      local surface_name = PLANETS[idx]
-      if enqueue_scan(surface_name) then
-        added = added + 1
-      end
-    end
-  end
-
-  local platform_surfaces = {}
-  add_platform_scan_surfaces(platform_surfaces, {})
-  for _, surface_name in ipairs(platform_surfaces) do
-    if enqueue_platform_scan(surface_name) then
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    local surface = game.surfaces[surface_name]
+    local platform = surface and get_surface_platform(surface)
+    local queued = platform and enqueue_platform_scan(surface_name) or enqueue_scan(surface_name)
+    if queued then
       added = added + 1
     end
   end
   return added
+end
+
+function amu_enqueue_surface_scan(surface_name, force_full_scan)
+  ensure_storage()
+  local surface = game.surfaces[surface_name]
+  if not surface or storage.amu_surface_paused[surface_name] then return false end
+  if force_full_scan then
+    storage.amu_registry_ready[surface_name] = nil
+    storage.amu_candidate_registry[surface_name] = {}
+  end
+  if get_surface_platform(surface) then return enqueue_platform_scan(surface_name) end
+  return enqueue_scan(surface_name)
 end
 
 local function finish_scan_job(job)
@@ -480,15 +433,23 @@ local function finish_scan_job(job)
     phase = "idle",
     candidates = job.candidates_seen or (job.all_entities and #job.all_entities or 0),
     queued = job.queued,
-    scanned = job.scanned
+    scanned = job.scanned,
+    skipped_proxy = job.skipped_proxy or 0,
+    skipped_low_pf = job.skipped_low_pf or 0,
+    skipped_no_work = job.skipped_no_work or 0,
+    skipped_excluded = job.skipped_excluded or 0,
+    registry_only = job.registry_only == true
   }
-  -- Save which planet was just scanned so we resume from the next one after load
-  for i, name in ipairs(PLANETS) do
-    if name == job.surface_name then
-      storage.last_scanned_planet_index = i
-      break
-    end
-  end
+  storage.amu_diagnostics[job.surface_name] = {
+    tick = game.tick,
+    candidates = job.candidates_seen or 0,
+    queued = job.queued or 0,
+    skipped_proxy = job.skipped_proxy or 0,
+    skipped_low_pf = job.skipped_low_pf or 0,
+    skipped_no_work = job.skipped_no_work or 0,
+    skipped_excluded = job.skipped_excluded or 0,
+    registry_only = job.registry_only == true
+  }
   if job.is_space_platform then
     active_platform_scan_job = nil
   else
@@ -509,7 +470,7 @@ end
 local function seed_pending_replacement_reservations(surface_name, reservations)
   for _, task in ipairs(pending_replacements) do
     if task.surface_name == surface_name then
-      reserve_items(reservations, task.entity_name, task.target_quality, 1)
+      reserve_items(reservations, task.upgrade_item_name or task.entity_name, task.target_quality, 1)
       reserve_module_plan_items(reservations, task.modules_plan)
     end
   end
@@ -524,9 +485,9 @@ local function get_scan_context(surface_name)
     if not amu_scan_space_platforms_enabled() then return nil end
     local force_name = get_force_name(platform.force)
     local planet_name = get_platform_location_planet_name(platform)
-    if not force_name or not planet_name then return nil end
+    if not force_name then return nil end
 
-    local supply_network = get_planet_rocket_supply_network(planet_name, force_name)
+    local supply_network = make_platform_hub_pool(platform)
     if not supply_network then return nil end
 
     return {
@@ -556,19 +517,35 @@ local function create_scan_job(surface_name, context)
   local reservations = {}
   seed_pending_replacement_reservations(surface_name, reservations)
 
+  local registry_only = storage.amu_registry_ready[surface_name] == true
+  local registered_entities = nil
+  if registry_only then
+    registered_entities = {}
+    for key, entity in pairs(storage.amu_candidate_registry[surface_name] or {}) do
+      if entity and entity.valid then
+        table.insert(registered_entities, entity)
+      else
+        storage.amu_candidate_registry[surface_name][key] = nil
+      end
+    end
+  end
+  local force_name_set = {}
+  for _, force_name in ipairs(context.force_names) do force_name_set[force_name] = true end
+
   local job = {
     surface_name = surface_name,
     surface = context.surface,
     chunk_iterator = context.surface.get_chunks(),
     force_names = context.force_names,
     force_filter = #context.force_names == 1 and context.force_names[1] or context.force_names,
+    force_name_set = force_name_set,
     logistic_network = context.logistic_network,
     is_space_platform = context.is_space_platform,
     supply_planet_name = context.supply_planet_name,
     phase = "collect",
     mode = USE_ABSOLUTE_PF and "absolute" or (USE_RATE_PRIORITY and "rate" or "direct"),
     all_entities = {},
-    pending_entities = nil,
+    pending_entities = registered_entities,
     pending_index = 1,
     candidates_seen = 0,
     index = 1,
@@ -579,7 +556,9 @@ local function create_scan_job(surface_name, context)
     skipped_proxy = 0,
     skipped_low_pf = 0,
     skipped_no_work = 0,
-    sq = sq
+    skipped_excluded = 0,
+    sq = sq,
+    registry_only = registry_only
   }
 
   scan_status[surface_name] = {
@@ -652,9 +631,12 @@ local function step_scan_collect(job)
       job.pending_index = job.pending_index + 1
       entities_processed = entities_processed + 1
 
-      if is_upgrade_candidate(entity) then
+      if is_upgrade_candidate(entity) and entity.force and job.force_name_set[entity.force.name] then
+        amu_register_candidate_entity(entity)
         job.candidates_seen = job.candidates_seen + 1
-        if job.mode == "rate" then
+        if amu_entity_is_excluded(entity) then
+          job.skipped_excluded = job.skipped_excluded + 1
+        elseif job.mode == "rate" then
           update_rate_candidate(job, entity)
         else
           table.insert(job.all_entities, entity)
@@ -664,12 +646,25 @@ local function step_scan_collect(job)
       job.pending_entities = nil
       job.pending_index = 1
 
+      if job.registry_only then
+        if job.mode == "rate" then
+          if job.candidates_seen == 0 then finish_scan_job(job); return end
+          job.phase = "prepare_tracked_queue"
+        else
+          if #job.all_entities == 0 then finish_scan_job(job); return end
+          job.phase = "evaluate"
+          job.index = 1
+        end
+        return
+      end
+
       if chunks_scanned >= max_chunks then
         break
       end
 
       local ok, chunk = pcall(job.chunk_iterator)
       if not ok or not chunk then
+        storage.amu_registry_ready[job.surface_name] = true
         if job.mode == "rate" then
           if job.candidates_seen == 0 then
             finish_scan_job(job)
@@ -708,6 +703,11 @@ local function step_scan_collect(job)
 end
 
 local function queue_entity_from_scan(job, entity)
+  if storage.amu_surface_paused[job.surface_name] or amu_entity_is_excluded(entity) then return end
+  if entity.item_request_proxy and entity.item_request_proxy.valid then
+    job.skipped_proxy = job.skipped_proxy + 1
+    return
+  end
   local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {
     dry_run = true,
     reservations = job.reservations,
@@ -728,6 +728,8 @@ local function queue_entity_from_scan(job, entity)
       supply_planet_name = job.supply_planet_name
     })
     job.queued = job.queued + 1
+  else
+    job.skipped_no_work = job.skipped_no_work + 1
   end
 end
 
@@ -745,7 +747,7 @@ local function step_absolute_or_direct_scan(job)
     local entity = job.all_entities[job.index]
     job.index = job.index + 1
 
-    if entity.valid and not (entity.item_request_proxy and entity.item_request_proxy.valid) then
+    if entity.valid then
       queue_entity_from_scan(job, entity)
     end
     processed = processed + 1
@@ -854,12 +856,17 @@ end
 local function step_scan_job(job)
   if not job then return end
 
+  if storage.amu_surface_paused[job.surface_name] then
+    finish_scan_job(job)
+    return
+  end
+
   if not job.surface or not job.surface.valid or not game.surfaces[job.surface_name] then
     finish_scan_job(job)
     return
   end
 
-  if job.is_space_platform and (not amu_scan_space_platforms_enabled() or not platform_still_at_planet(job.surface, job.supply_planet_name)) then
+  if job.is_space_platform and (not amu_scan_space_platforms_enabled() or not get_surface_platform(job.surface)) then
     finish_scan_job(job)
     return
   end
@@ -937,15 +944,26 @@ end
 -- Apply a pre-computed plan directly (no re-evaluation)
 local function apply_building_plan(entity, modules_plan, removal_plan, info)
   ensure_storage()
-  if not entity.valid then return end
-  if entity.to_be_upgraded() then return end
+  if not entity.valid then return false, "invalid" end
   local has_modules = modules_plan and next(modules_plan)
   local has_removals = removal_plan and next(removal_plan)
-  if not has_modules and not has_removals then return end
+  if not has_modules and not has_removals then return false, "empty-plan" end
+
+  local valid_plan, invalid_reason = amu_validate_module_plan(entity, modules_plan, removal_plan)
+  if not valid_plan then return false, invalid_reason end
+
+  local proxy = entity.surface.create_entity{
+    name = "item-request-proxy",
+    target = entity,
+    position = entity.position,
+    force = entity.force,
+    modules = modules_plan,
+    removal_plan = removal_plan
+  }
+  if not proxy then return false, "proxy-creation-failed" end
 
   -- Track stats
   local surface_name = entity.surface.name
-  storage.surface_buildings_upgraded[surface_name] = (storage.surface_buildings_upgraded[surface_name] or 0) + 1
   storage.surface_last_upgraded[surface_name] = {
     x = entity.position.x,
     y = entity.position.y,
@@ -963,22 +981,11 @@ local function apply_building_plan(entity, modules_plan, removal_plan, info)
     end
   end
 
-  if entity.item_request_proxy and entity.item_request_proxy.valid then
-    entity.item_request_proxy.destroy()
-  end
-  entity.surface.create_entity{
-    name = "item-request-proxy",
-    target = entity,
-    position = entity.position,
-    force = entity.force,
-    modules = modules_plan,
-    removal_plan = removal_plan
-  }
   amu_record_changed_building(entity)
   if DEBUG then
     game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " pf_rate=" .. format_pf_rate(entity) .. " — " .. (info or ""))
   end
-  return true
+  return true, nil
 end
 
 -- ============================================================
@@ -991,10 +998,10 @@ function on_tick_handler()
     if LOG_TICKS and #sq.queue > 0 then
       game.print("[AutoModuleUpgrade] [TICK] " .. surface_name .. " queue=" .. #sq.queue)
     end
-    if #sq.queue > 0 then
+    if #sq.queue > 0 and not storage.amu_surface_paused[surface_name] then
       local entry = table.remove(sq.queue, 1)
       local entity = entry.entity
-      if entity.valid then
+      if entity.valid and not amu_entity_is_excluded(entity) then
         -- Skip if rate-priority mode and building has no meaningful rate yet
         if USE_RATE_PRIORITY then
           local skip_rate = should_skip_rate_priority(entity)
@@ -1011,7 +1018,8 @@ function on_tick_handler()
         if entry.platform_supply_required and not platform_supply_available(entity.surface, entity.force, entry.supply_planet_name) then
           goto skip_apply
         end
-        apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
+        local applied = apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
+        if not applied then goto skip_apply end
         sq.batch_upgraded = sq.batch_upgraded + 1
         if entry.module_upgrades then
           if not storage.surface_module_upgrades[surface_name] then storage.surface_module_upgrades[surface_name] = {} end
@@ -1079,13 +1087,27 @@ function on_tick_handler()
         end
         if is_original then goto skip_entity end
         -- Found the newly upgraded higher-quality building
-        local pf_ok = pcall(function() e.products_finished = task.saved_pf end)
+        local pf_ok = true
+        if task.saved_pf_supported ~= false then
+          pf_ok = pcall(function() e.products_finished = task.saved_pf end)
+        end
         local needs_followup_supply = (task.modules_plan and next(task.modules_plan)) or (task.removal_plan and next(task.removal_plan))
         if task.platform_supply_required and needs_followup_supply and not platform_supply_available(e.surface, e.force, task.supply_planet_name) then
           goto skip_entity
         end
-        local applied_followup = apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
-        if not applied_followup then
+        local applied_followup = false
+        if needs_followup_supply then
+          local followup_reason
+          applied_followup, followup_reason = apply_building_plan(e, task.modules_plan, task.removal_plan, task.info)
+          -- An existing proxy is transient bot work, so retain the deferred task.
+          -- Any other rejection means the saved plan became stale after replacement;
+          -- finish the building upgrade and let a fresh scan calculate a valid plan.
+          if not applied_followup and followup_reason == "existing-proxy" then goto skip_entity end
+          if not applied_followup then
+            amu_record_changed_building(e)
+            amu_enqueue_surface_scan(task.surface_name, false)
+          end
+        else
           amu_record_changed_building(e)
         end
         local do_camera = storage.global_camera_follow
@@ -1101,6 +1123,7 @@ function on_tick_handler()
           end
         end
         -- Track building quality upgrade breakdown
+        storage.surface_buildings_upgraded[task.surface_name] = (storage.surface_buildings_upgraded[task.surface_name] or 0) + 1
         if not storage.surface_building_upgrades[task.surface_name] then storage.surface_building_upgrades[task.surface_name] = {} end
         local b_key = task.entity_name .. "|" .. task.original_quality .. "|" .. task.target_quality
         storage.surface_building_upgrades[task.surface_name][b_key] = (storage.surface_building_upgrades[task.surface_name][b_key] or 0) + 1
