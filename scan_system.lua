@@ -2,6 +2,54 @@
 -- Rate Tracking & Queue Variables
 -- ============================================================
 
+-- Non-persistent by design: profiler timings are non-deterministic diagnostics
+-- and a dump session can be restarted after loading a save.
+amu_runtime_profile = nil
+
+function amu_start_runtime_profile()
+  local total = helpers.create_profiler(true)
+  local window = helpers.create_profiler(true)
+  amu_runtime_profile = {
+    started_tick = game.tick,
+    total = total,
+    samples = 0,
+    window = window,
+    window_started_tick = game.tick,
+    window_samples = 0,
+    previous_window = nil,
+    previous_window_samples = 0,
+    previous_window_ticks = 0
+  }
+end
+
+function amu_get_runtime_profile()
+  return amu_runtime_profile
+end
+
+local function begin_runtime_profile_sample()
+  if not amu_runtime_profile then amu_start_runtime_profile() end
+  return helpers.create_profiler(false)
+end
+
+local function finish_runtime_profile_sample(sample)
+  local profile = amu_runtime_profile
+  if not sample or not profile then return end
+  sample.stop()
+  profile.total.add(sample)
+  profile.window.add(sample)
+  profile.samples = profile.samples + 1
+  profile.window_samples = profile.window_samples + 1
+
+  if game.tick - profile.window_started_tick >= 3600 then
+    profile.previous_window = profile.window
+    profile.previous_window_samples = profile.window_samples
+    profile.previous_window_ticks = game.tick - profile.window_started_tick
+    profile.window = helpers.create_profiler(true)
+    profile.window_started_tick = game.tick
+    profile.window_samples = 0
+  end
+end
+
 -- Normalize raw diff to items per minute based on actual interval between readings
 local function get_rate_per_min(entry)
   local n = #entry.pf_history
@@ -196,21 +244,60 @@ local function get_player_force_names()
   return force_names
 end
 
+local function should_include_planet_surface(surface)
+  if not surface or not surface.valid or get_surface_platform(surface) then return false end
+  return get_planet(surface.name) ~= nil
+end
+
+local function should_include_platform_surface(surface)
+  local platform = get_surface_platform(surface)
+  if not platform then return false end
+  local scheduled = 0
+  local ok_scheduled, value = pcall(function() return platform.scheduled_for_deletion end)
+  if ok_scheduled and value then scheduled = value end
+  if scheduled ~= 0 then return false end
+  return true
+end
+
 local function add_platform_scan_surfaces(surface_names, seen)
   if not amu_scan_space_platforms_enabled() then return end
 
   for _, surface in pairs(game.surfaces) do
-    local platform = get_surface_platform(surface)
-    if platform and not seen[surface.name] then
-      local scheduled = 0
-      local ok_scheduled, value = pcall(function() return platform.scheduled_for_deletion end)
-      if ok_scheduled and value then scheduled = value end
-      if scheduled == 0 then
-        seen[surface.name] = true
-        table.insert(surface_names, surface.name)
-      end
+    if not seen[surface.name] and should_include_platform_surface(surface) then
+      seen[surface.name] = true
+      table.insert(surface_names, surface.name)
     end
   end
+end
+
+local function surface_planet_sort_key(surface_name)
+  local planet = get_planet(surface_name)
+  if not planet or not planet.valid or not planet.prototype then return nil end
+  return planet.prototype.order or surface_name
+end
+
+local function sort_scan_surface_names(surface_names)
+  table.sort(surface_names, function(a, b)
+    local a_surface = game.surfaces[a]
+    local b_surface = game.surfaces[b]
+    local a_platform = a_surface and get_surface_platform(a_surface) ~= nil or false
+    local b_platform = b_surface and get_surface_platform(b_surface) ~= nil or false
+
+    if a_platform ~= b_platform then
+      return not a_platform
+    end
+
+    if not a_platform then
+      local a_order = surface_planet_sort_key(a) or a
+      local b_order = surface_planet_sort_key(b) or b
+      if a_order ~= b_order then
+        return a_order < b_order
+      end
+      return a < b
+    end
+
+    return a < b
+  end)
 end
 
 function get_scan_surface_names()
@@ -219,7 +306,7 @@ function get_scan_surface_names()
 
   if amu_scan_planets_enabled() then
     for _, surface in pairs(game.surfaces) do
-      if not get_surface_platform(surface) then
+      if should_include_planet_surface(surface) then
         seen[surface.name] = true
         table.insert(surface_names, surface.name)
       end
@@ -227,7 +314,7 @@ function get_scan_surface_names()
   end
 
   add_platform_scan_surfaces(surface_names, seen)
-  table.sort(surface_names)
+  sort_scan_surface_names(surface_names)
   return surface_names
 end
 
@@ -400,13 +487,26 @@ function enqueue_all_scans()
   return added
 end
 
+function amu_enqueue_full_discovery_scans()
+  ensure_storage()
+  local added = 0
+  for _, surface_name in ipairs(get_scan_surface_names()) do
+    if amu_enqueue_surface_scan(surface_name, true) then
+      added = added + 1
+    end
+  end
+  return added
+end
+
 function amu_enqueue_surface_scan(surface_name, force_full_scan)
   ensure_storage()
   local surface = game.surfaces[surface_name]
   if not surface or storage.amu_surface_paused[surface_name] then return false end
   if force_full_scan then
     storage.amu_registry_ready[surface_name] = nil
-    storage.amu_candidate_registry[surface_name] = {}
+    -- Keep known candidates usable while the deliberately incremental full
+    -- discovery pass validates and extends the registry.
+    storage.amu_candidate_registry[surface_name] = storage.amu_candidate_registry[surface_name] or {}
   end
   if get_surface_platform(surface) then return enqueue_platform_scan(surface_name) end
   return enqueue_scan(surface_name)
@@ -531,13 +631,14 @@ local function create_scan_job(surface_name, context)
   end
   local force_name_set = {}
   for _, force_name in ipairs(context.force_names) do force_name_set[force_name] = true end
+  local force_filter = #context.force_names == 1 and context.force_names[1] or context.force_names
 
   local job = {
     surface_name = surface_name,
     surface = context.surface,
     chunk_iterator = context.surface.get_chunks(),
     force_names = context.force_names,
-    force_filter = #context.force_names == 1 and context.force_names[1] or context.force_names,
+    force_filter = force_filter,
     force_name_set = force_name_set,
     logistic_network = context.logistic_network,
     is_space_platform = context.is_space_platform,
@@ -589,7 +690,7 @@ local function start_next_scan_job()
     local context = get_scan_context(surface_name)
     if context and not context.is_space_platform then
       active_scan_job = create_scan_job(surface_name, context)
-      return
+      if active_scan_job then return end
     end
   end
   if #scan_queue == 0 then
@@ -609,7 +710,7 @@ local function start_next_platform_scan_job()
     local context = get_scan_context(surface_name)
     if context and context.is_space_platform then
       active_platform_scan_job = create_scan_job(surface_name, context)
-      return
+      if active_platform_scan_job then return end
     end
   end
 end
@@ -994,6 +1095,7 @@ end
 
 -- Process one building from each surface queue every tick
 function on_tick_handler()
+  local runtime_profile_sample = begin_runtime_profile_sample()
   for surface_name, sq in pairs(processing_queues) do
     if LOG_TICKS and #sq.queue > 0 then
       game.print("[AutoModuleUpgrade] [TICK] " .. surface_name .. " queue=" .. #sq.queue)
@@ -1160,4 +1262,5 @@ function on_tick_handler()
       end
     end
   end
+  finish_runtime_profile_sample(runtime_profile_sample)
 end

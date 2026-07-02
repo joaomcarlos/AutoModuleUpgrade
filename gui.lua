@@ -2,6 +2,8 @@
 -- Scan Status GUI
 -- ============================================================
 
+local amu_dump_translation_requests = {}
+
 -- Helper: format tick delta as mm:ss
 local function format_time(ticks)
   if not ticks or ticks < 0 then return "0:00" end
@@ -84,6 +86,21 @@ local function total_tracker_entities()
   return total
 end
 
+local function count_pending_scan_surfaces()
+  return #(scan_queue or {})
+end
+
+local function count_pending_platform_scan_surfaces()
+  return #(platform_scan_queue or {})
+end
+
+local function performance_dump_scan_complete()
+  return count_pending_scan_surfaces() == 0
+    and count_pending_platform_scan_surfaces() == 0
+    and active_scan_job == nil
+    and active_platform_scan_job == nil
+end
+
 local function safe_surface_setting(surface_name, map)
   return map and map[surface_name] == true and "true" or "false"
 end
@@ -126,7 +143,7 @@ end
 function amu_build_performance_dump()
   ensure_storage()
   local lines = {}
-  local surfaces = get_scan_surface_names()
+  local surfaces = get_scan_surface_names(true, true)
 
   table.insert(lines, "AutoModuleUpgrade performance dump")
   table.insert(lines, "Generated at tick: " .. tostring(game.tick))
@@ -146,6 +163,11 @@ function amu_build_performance_dump()
   table.insert(lines, "queued_plans=" .. tostring(total_queued_plans()))
   table.insert(lines, "pending_quality_upgrades=" .. tostring(#(pending_replacements or {})))
   table.insert(lines, "tracked_entities=" .. tostring(total_tracker_entities()))
+  table.insert(lines, "pending_planet_scan_surfaces=" .. tostring(count_pending_scan_surfaces()))
+  table.insert(lines, "pending_platform_scan_surfaces=" .. tostring(count_pending_platform_scan_surfaces()))
+  table.insert(lines, "active_planet_scan=" .. tostring(active_scan_job and active_scan_job.surface_name or "none"))
+  table.insert(lines, "active_platform_scan=" .. tostring(active_platform_scan_job and active_platform_scan_job.surface_name or "none"))
+  table.insert(lines, "scan_complete=" .. tostring(performance_dump_scan_complete()))
   table.insert(lines, "global_camera_follow=" .. tostring(storage.global_camera_follow == true))
   table.insert(lines, "log_override=" .. tostring(storage.LOG_OVERRIDE == true))
   table.insert(lines, "")
@@ -164,8 +186,78 @@ function amu_build_performance_dump()
   return table.concat(lines, "\n")
 end
 
+local function profiler_average(total, samples)
+  if not total or not total.valid or not samples or samples <= 0 then return nil end
+  local average = helpers.create_profiler(true)
+  average.add(total)
+  average.divide(samples)
+  return average
+end
+
+local function build_runtime_profile_localised_string(base_dump)
+  local profile = amu_get_runtime_profile()
+  if not profile then
+    return {"", base_dump, "\n\n[runtime_profile]\nstatus=not_started"}
+  end
+
+  local session_average = profiler_average(profile.total, profile.samples)
+  local window_average = profiler_average(profile.window, profile.window_samples)
+  local current = {
+    "",
+    "\nscope=AutoModuleUpgrade scheduler handler",
+    "\nelapsed_ticks=", tostring(game.tick - profile.started_tick),
+    "\nsamples=", tostring(profile.samples),
+    "\ntotal=", profile.total,
+    "\naverage_per_sample=", session_average or "n/a",
+    "\ncurrent_window_ticks=", tostring(game.tick - profile.window_started_tick),
+    "\ncurrent_window_samples=", tostring(profile.window_samples),
+    "\ncurrent_window_total=", profile.window,
+    "\ncurrent_window_average=", window_average or "n/a"
+  }
+  local previous = ""
+  if profile.previous_window then
+    local previous_average = profiler_average(profile.previous_window, profile.previous_window_samples)
+    previous = {
+      "",
+      "\nprevious_window_ticks=", tostring(profile.previous_window_ticks),
+      "\nprevious_window_samples=", tostring(profile.previous_window_samples),
+      "\nprevious_window_total=", profile.previous_window,
+      "\nprevious_window_average=", previous_average or "n/a"
+    }
+  end
+  return {
+    "", base_dump,
+    "\n\n[runtime_profile]", current, previous,
+    "\nnote=Factorio does not expose raw profiler values to Lua, so min/max cannot be calculated safely."
+  }
+end
+
+local function request_performance_dump_translation(player, textbox)
+  local request_id = player.request_translation(build_runtime_profile_localised_string(amu_build_performance_dump()))
+  amu_dump_translation_requests[request_id] = {
+    player_index = player.index,
+    textbox = textbox
+  }
+end
+
+function amu_handle_dump_translation(event)
+  local pending = amu_dump_translation_requests[event.id]
+  if not pending then return end
+  amu_dump_translation_requests[event.id] = nil
+  if not event.translated then return end
+  local player = game.get_player(pending.player_index)
+  local textbox = pending.textbox
+  if not player or not player.valid or not textbox or not textbox.valid then return end
+  textbox.text = event.result
+  textbox.select_all()
+  player.opened = textbox
+end
+
 function amu_open_performance_dump_window(player)
   if not player or not player.valid then return end
+  if not amu_get_runtime_profile() then
+    amu_start_runtime_profile()
+  end
   local screen = player.gui.screen
   local existing = screen[AMU_DUMP_WINDOW_NAME]
   if existing and existing.valid then existing.destroy() end
@@ -201,14 +293,14 @@ function amu_open_performance_dump_window(player)
   local textbox = frame.add{
     type = "text-box",
     name = AMU_DUMP_WINDOW_NAME .. "-textbox",
-    text = amu_build_performance_dump()
+    text = amu_build_performance_dump() .. "\n\n[runtime_profile]\nstatus=translating"
   }
   textbox.style.width = 860
   textbox.style.height = 560
   textbox.word_wrap = false
-  textbox.clear_and_focus_on_right_click = false
   textbox.select_all()
   player.opened = textbox
+  request_performance_dump_translation(player, textbox)
 end
 
 function amu_refresh_performance_dump_window(player)
@@ -220,21 +312,19 @@ function amu_refresh_performance_dump_window(player)
   end
   local textbox = window[AMU_DUMP_WINDOW_NAME .. "-textbox"]
   if textbox and textbox.valid then
-    textbox.text = amu_build_performance_dump()
-    textbox.select_all()
-    player.opened = textbox
+    textbox.text = amu_build_performance_dump() .. "\n\n[runtime_profile]\nstatus=translating"
+    request_performance_dump_translation(player, textbox)
   end
 end
 
-local function find_child(parent, name)
-  if not parent or not parent.valid then return nil end
-  local child = parent[name]
-  if child then return child end
-  for _, nested in pairs(parent.children) do
-    child = find_child(nested, name)
-    if child then return child end
-  end
-  return nil
+local function find_scan_cell(rows_flow, row_index, cell_name)
+  local row = rows_flow[AMU_WINDOW_NAME .. "-row-" .. row_index]
+  if not row or not row.valid then return nil end
+  local element_name = AMU_WINDOW_NAME .. "-cell-" .. row_index .. "-" .. cell_name
+  local direct = row[element_name]
+  if direct then return direct end
+  local container = row[element_name .. "-container"]
+  return container and container[element_name] or nil
 end
 
 local function is_scanning_surface(surface_name)
@@ -279,14 +369,15 @@ local function get_idle_platform_surface_names()
   return idle
 end
 
-function get_scan_window_surface_rows()
+function get_scan_window_row_entries()
   local rows = {}
+  local planets = {}
   local active_platforms = {}
   local idle_platforms = get_idle_platform_surface_names()
 
   for _, surface_name in ipairs(get_scan_surface_names()) do
     if not is_platform_surface(surface_name) then
-      table.insert(rows, surface_name)
+      table.insert(planets, surface_name)
     elseif is_scanning_surface(surface_name) then
       table.insert(active_platforms, surface_name)
     end
@@ -294,14 +385,28 @@ function get_scan_window_surface_rows()
 
   sort_platform_surfaces_by_changes(active_platforms)
 
+  for _, surface_name in ipairs(planets) do
+    table.insert(rows, {kind = "surface", surface_name = surface_name})
+  end
+
   for _, surface_name in ipairs(active_platforms) do
-    table.insert(rows, surface_name)
+    table.insert(rows, {kind = "surface", surface_name = surface_name})
   end
 
   for _, surface_name in ipairs(idle_platforms) do
-    table.insert(rows, surface_name)
+    table.insert(rows, {kind = "surface", surface_name = surface_name})
   end
 
+  return rows
+end
+
+function get_scan_window_surface_rows()
+  local rows = {}
+  for _, entry in ipairs(get_scan_window_row_entries()) do
+    if entry.kind == "surface" then
+      table.insert(rows, entry.surface_name)
+    end
+  end
   return rows
 end
 
@@ -344,6 +449,7 @@ end
 local function add_planet_cell(parent, name, sprite, tooltip)
   local cell = parent.add{
     type = "flow",
+    name = name and (name .. "-container") or nil,
     style = "amu_scan_planet_cell",
     direction = "horizontal"
   }
@@ -398,17 +504,15 @@ local function add_scan_data_row(rows_flow, row_index)
   }
 end
 
-local function sync_scan_rows(rows_flow, target_count)
-  local existing_count = #rows_flow.children - 1
-  while existing_count > target_count do
+local function rebuild_scan_rows(rows_flow, entries)
+  while #rows_flow.children > 1 do
     local last = rows_flow.children[#rows_flow.children]
     if last and last.valid then
       last.destroy()
     end
-    existing_count = existing_count - 1
   end
 
-  for row_index = existing_count + 1, target_count do
+  for row_index in ipairs(entries) do
     add_scan_data_row(rows_flow, row_index)
   end
 end
@@ -539,7 +643,7 @@ function create_scan_window(player)
   add_header_label(header_row, {"amu-gui.camera"}, "cam")
 
   -- Store reference
-  amu_gui_players[player.index] = {window = window, visible = true}
+  amu_gui_players[player.index] = {window = window, visible = true, row_signature = nil}
 
   -- Restore location if known
   local pdata = storage.amu_gui_locations and storage.amu_gui_locations[player.index]
@@ -564,6 +668,7 @@ function update_scan_window(player)
     create_scan_window(player)
     window = player.gui.screen[AMU_WINDOW_NAME]
     if not window then return end
+    gui_data = amu_gui_players[player.index]
   end
 
   -- Update title bar button states
@@ -606,11 +711,20 @@ function update_scan_window(player)
   local rows_flow = window[AMU_WINDOW_NAME .. "-content"][AMU_WINDOW_NAME .. "-scroll"][AMU_WINDOW_NAME .. "-rows"]
   if not rows_flow then return end
 
-  local target_surfaces = get_scan_window_surface_rows()
-  sync_scan_rows(rows_flow, #target_surfaces)
+  local row_entries = get_scan_window_row_entries()
+  local signature_parts = {}
+  for i, entry in ipairs(row_entries) do
+    signature_parts[i] = entry.surface_name
+  end
+  local row_signature = table.concat(signature_parts, "\n")
+  if gui_data.row_signature ~= row_signature then
+    rebuild_scan_rows(rows_flow, row_entries)
+    gui_data.row_signature = row_signature
+  end
 
   -- Populate rows
-  for i, surface_name in ipairs(target_surfaces) do
+  for i, entry in ipairs(row_entries) do
+    local surface_name = entry.surface_name
     local st = scan_status[surface_name] or {}
     local surface = game.surfaces[surface_name]
     local surface_available = surface and surface.valid
@@ -623,14 +737,13 @@ function update_scan_window(player)
     end
 
     -- Surface icon
-    local planet_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-planet")
+    local planet_cell = find_scan_cell(rows_flow, i, "planet")
     if planet_cell and planet_cell.valid then
       planet_cell.sprite = get_surface_sprite(surface_name)
       planet_cell.tooltip = get_surface_tooltip(surface_name)
     end
-
     -- Queued
-    local queued_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-queued")
+    local queued_cell = find_scan_cell(rows_flow, i, "queued")
     if queued_cell and queued_cell.valid then
       local sq = processing_queues[surface_name]
       local queue_size = sq and #sq.queue or 0
@@ -639,14 +752,14 @@ function update_scan_window(player)
     end
 
     -- Candidates
-    local cand_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-cand")
+    local cand_cell = find_scan_cell(rows_flow, i, "cand")
     if cand_cell and cand_cell.valid then
       cand_cell.caption = tostring(st.candidates or 0)
       cand_cell.tooltip = surface_available and "Candidates collected" or "Surface does not exist yet"
     end
 
     -- Upgraded (buildings)
-    local upgraded_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-upgraded")
+    local upgraded_cell = find_scan_cell(rows_flow, i, "upgraded")
     if upgraded_cell and upgraded_cell.valid then
       local count = storage.surface_buildings_upgraded[surface_name] or 0
       upgraded_cell.caption = tostring(count)
@@ -668,7 +781,7 @@ function update_scan_window(player)
     end
 
     -- Modules placed (grouped by category: quality / prod / speed; efficiency ignored)
-    local mods_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-mods")
+    local mods_cell = find_scan_cell(rows_flow, i, "mods")
     if mods_cell and mods_cell.valid then
       local mod_stats = storage.surface_modules_placed[surface_name]
       local total = 0
@@ -710,7 +823,7 @@ function update_scan_window(player)
     end
 
     -- Time / watch (green when scanning, white when idle)
-    local time_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-time")
+    local time_cell = find_scan_cell(rows_flow, i, "time")
     if time_cell and time_cell.valid then
       if is_scanning then
         time_cell.caption = format_time(elapsed)
@@ -724,7 +837,7 @@ function update_scan_window(player)
     end
 
     -- Status
-    local status_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-status")
+    local status_cell = find_scan_cell(rows_flow, i, "status")
     if status_cell and status_cell.valid then
       local diagnostics = storage.amu_diagnostics[surface_name] or {}
       local diagnostic_tooltip = {
@@ -758,7 +871,7 @@ function update_scan_window(player)
     end
 
     -- Jump button: center camera on last upgraded building and highlight changed buildings
-    local jump_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-jump")
+    local jump_cell = find_scan_cell(rows_flow, i, "jump")
     if jump_cell and jump_cell.valid then
       local last = storage.surface_last_upgraded[surface_name]
       if last and last.tick then
@@ -777,7 +890,7 @@ function update_scan_window(player)
     end
 
     -- Camera toggle button: shows check when enabled, close when disabled
-    local cam_cell = find_child(rows_flow, AMU_WINDOW_NAME .. "-cell-" .. i .. "-cam")
+    local cam_cell = find_scan_cell(rows_flow, i, "cam")
     if cam_cell and cam_cell.valid then
       local enabled = storage.surface_camera_follow[surface_name] == true
       cam_cell.sprite = "amu_row_close_button"

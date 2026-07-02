@@ -33,7 +33,7 @@ script.on_configuration_changed(function()
     end
   end
   amu_gui_players = {}
-  enqueue_all_scans()
+  amu_enqueue_full_discovery_scans()
 end)
 
 script.on_init(function()
@@ -59,7 +59,7 @@ script.on_init(function()
   storage.amu_diagnostics = {}
   storage.last_auto_scan_tick = 0
   pending_replacements = storage.pending_replacements
-  enqueue_all_scans()
+  amu_enqueue_full_discovery_scans()
 end)
 
 script.on_load(function()
@@ -247,6 +247,10 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function()
   enqueue_all_scans()
 end)
 
+script.on_event(defines.events.on_string_translated, function(event)
+  amu_handle_dump_translation(event)
+end)
+
 script.on_event(defines.events.on_pre_surface_deleted, function(event)
   ensure_storage()
   local surface = game.surfaces[event.surface_index]
@@ -377,13 +381,13 @@ script.on_event(defines.events.on_gui_click, function(event)
     return
   end
 
-  if name == AMU_WINDOW_NAME .. "-dump" then
-    amu_open_performance_dump_window(player)
+  if name == AMU_DUMP_WINDOW_NAME .. "-refresh" then
+    amu_refresh_performance_dump_window(player)
     return
   end
 
-  if name == AMU_DUMP_WINDOW_NAME .. "-refresh" then
-    amu_refresh_performance_dump_window(player)
+  if name == AMU_WINDOW_NAME .. "-dump" then
+    amu_open_performance_dump_window(player)
     return
   end
 
