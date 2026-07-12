@@ -52,13 +52,7 @@ local function get_surface_tooltip(surface_name)
 end
 
 local function count_valid_registered_entities(surface_name)
-  local count = 0
-  local registry = storage.amu_candidate_registry and storage.amu_candidate_registry[surface_name]
-  if not registry then return 0 end
-  for _, entity in pairs(registry) do
-    if entity and entity.valid then count = count + 1 end
-  end
-  return count
+  return amu_count_registered_entities(surface_name)
 end
 
 local function total_registered_entities()

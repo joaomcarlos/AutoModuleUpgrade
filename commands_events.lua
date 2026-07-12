@@ -6,6 +6,7 @@
 script.on_configuration_changed(function()
   game.print("[AutoModuleUpgrade] Mod loaded, rebuilding module lookups...")
   build_module_lookups()
+  amu_refresh_candidate_event_filters()
   -- Ensure persistent storage tables exist
   storage.surface_buildings_upgraded = storage.surface_buildings_upgraded or {}
   storage.surface_modules_placed = storage.surface_modules_placed or {}
@@ -39,6 +40,7 @@ end)
 script.on_init(function()
   game.print("[AutoModuleUpgrade] Mod initialized.")
   build_module_lookups()
+  amu_refresh_candidate_event_filters()
   -- Initialize persistent storage tables
   storage.surface_buildings_upgraded = {}
   storage.surface_modules_placed = {}
@@ -65,6 +67,7 @@ end)
 script.on_load(function()
   -- Rebuild only ordinary Lua globals; storage must not be mutated in on_load.
   build_module_lookups()
+  amu_refresh_candidate_event_filters()
   pending_replacements = storage.pending_replacements or {}
 end)
 
@@ -132,8 +135,8 @@ commands.add_command("amu-stats", "Show AutoModuleUpgrade registry and queue dia
   local player = event.player_index and game.get_player(event.player_index) or nil
   local destination = player or game
   local registered = 0
-  for _, entities in pairs(storage.amu_candidate_registry) do
-    for _, entity in pairs(entities) do if entity and entity.valid then registered = registered + 1 end end
+  for surface_name in pairs(storage.amu_candidate_registry) do
+    registered = registered + amu_count_registered_entities(surface_name)
   end
   local queued = 0
   for _, sq in pairs(processing_queues) do queued = queued + #sq.queue end
@@ -215,22 +218,38 @@ local function unregister_event_entity(event)
   if entity then amu_unregister_candidate_entity(entity) end
 end
 
-script.on_event({
+local candidate_registration_events = {
   defines.events.on_built_entity,
   defines.events.on_robot_built_entity,
   defines.events.script_raised_built,
   defines.events.script_raised_revive,
   defines.events.on_entity_cloned,
   defines.events.on_space_platform_built_entity
-}, register_event_entity)
+}
 
-script.on_event({
+local candidate_removal_events = {
   defines.events.on_player_mined_entity,
   defines.events.on_robot_mined_entity,
   defines.events.on_entity_died,
   defines.events.script_raised_destroy,
   defines.events.on_space_platform_mined_entity
-}, unregister_event_entity)
+}
+
+script.on_event(candidate_registration_events, register_event_entity)
+script.on_event(candidate_removal_events, unregister_event_entity)
+
+function amu_refresh_candidate_event_filters()
+  local filters = {}
+  for _, entity_name in ipairs(scan_candidate_entity_names or {}) do
+    filters[#filters + 1] = {filter = "name", name = entity_name}
+  end
+  for _, event_id in ipairs(candidate_registration_events) do
+    script.set_event_filter(event_id, filters)
+  end
+  for _, event_id in ipairs(candidate_removal_events) do
+    script.set_event_filter(event_id, filters)
+  end
+end
 
 script.on_event(defines.events.on_research_finished, function()
   enqueue_all_scans()

@@ -29,7 +29,7 @@ styles.amu_scan_scroll_pane = {
   parent = "naked_scroll_pane",
   extra_padding_when_activated = 0,
   padding = 0,
-  horizontally_stretchable = "on"
+  horizontally_stretchable = "off"
 }
 
 styles.amu_scan_table = {
