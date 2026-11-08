@@ -4,7 +4,7 @@ Guidance for AI agents working on this Factorio mod.
 
 ## Project Context
 
-This is a Factorio 2.0 runtime mod. Treat gameplay logic as API-sensitive: many bugs come from using a plausible Lua shape that is not the shape Factorio actually accepts.
+This is a Factorio 2.1 runtime mod. Treat gameplay logic as API-sensitive: many bugs come from using a plausible Lua shape that is not the shape Factorio actually accepts.
 
 Core files:
 

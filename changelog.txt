@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.1.0
+Date: 31-8-2026
+  Compatibility:
+    - Bumped factorio_version to 2.1 and base dependency to >= 2.1.0.
+    - Audited control/data/settings against the 2.1 API diff; no breaking API usage found.
+
+---------------------------------------------------------------------------------------------------
 Version: 1.0.0
 Date: 2026-07-01
   Features:
