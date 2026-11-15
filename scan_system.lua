@@ -300,6 +300,11 @@ local function get_player_force_names()
       table.insert(force_names, player.force.name)
     end
   end
+  -- Before any player has ever joined (fresh dedicated server), game.players
+  -- is empty; still scan the default force so its buildings are not ignored.
+  if #force_names == 0 then
+    table.insert(force_names, "player")
+  end
   return force_names
 end
 
