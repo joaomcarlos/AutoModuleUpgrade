@@ -12,6 +12,7 @@ script.on_configuration_changed(function()
   storage.surface_modules_placed = storage.surface_modules_placed or {}
   storage.surface_building_upgrades = storage.surface_building_upgrades or {}
   storage.surface_module_upgrades = storage.surface_module_upgrades or {}
+  storage.surface_equipment_upgrades = storage.surface_equipment_upgrades or {}
   storage.surface_last_upgraded = storage.surface_last_upgraded or {}
   storage.surface_changed_buildings = storage.surface_changed_buildings or {}
   storage.amu_change_highlight_objects = storage.amu_change_highlight_objects or {}
@@ -46,6 +47,7 @@ script.on_init(function()
   storage.surface_modules_placed = {}
   storage.surface_building_upgrades = {}
   storage.surface_module_upgrades = {}
+  storage.surface_equipment_upgrades = {}
   storage.surface_last_upgraded = {}
   storage.surface_changed_buildings = {}
   storage.amu_change_highlight_objects = {}
@@ -92,7 +94,8 @@ commands.add_command("amu-hover", "Check module upgrades for currently selected 
   local ok_inv, module_inv = pcall(function() return entity.get_module_inventory() end)
   local has_module_slots = ok_inv and module_inv and #module_inv > 0
   local can_quality_upgrade = amu_can_quality_upgrade_entity(entity) and get_next_building_quality(entity)
-  if not has_module_slots and not can_quality_upgrade then
+  local has_grid = entity_has_grid(entity)
+  if not has_module_slots and not can_quality_upgrade and not has_grid then
     player.print({"amu-message.no-module-slots", entity.localised_name})
     return
   end
@@ -330,6 +333,7 @@ script.on_nth_tick(UPS, function(event)
     storage.last_auto_scan_tick = event.tick
     enqueue_all_scans()
   end
+  if amu_process_player_equipment then amu_process_player_equipment() end
 end)
 
 script.on_event(defines.events.on_space_platform_changed_state, function(event)

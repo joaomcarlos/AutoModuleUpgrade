@@ -201,6 +201,10 @@ function amu_scan_space_platforms_enabled()
   return setting_enabled(SCAN_SPACE_PLATFORMS_SETTING, true)
 end
 
+function amu_scan_equipment_enabled()
+  return setting_enabled(AMU_SCAN_EQUIPMENT_SETTING, true)
+end
+
 function amu_scan_interval_ticks()
   return math.max(UPS, setting_int(SCAN_INTERVAL_SETTING, SCAN_INTERVAL_SEC) * UPS)
 end
@@ -457,6 +461,11 @@ local function is_upgrade_candidate(entity)
     return true
   end
   if scan_quality_entity_name_set[entity_name] and get_next_building_quality(entity) then
+    return true
+  end
+  -- Entities with equipment grids stay registered even when the equipment
+  -- setting is off, so re-enabling the setting does not need a re-discovery.
+  if scan_grid_entity_name_set[entity_name] then
     return true
   end
   local ok_inv, module_inv = pcall(function() return entity.get_module_inventory() end)
@@ -958,13 +967,16 @@ local function queue_entity_from_scan(job, entity)
     job.skipped_proxy = job.skipped_proxy + 1
     return
   end
-  local result, info, modules_plan, removal_plan, module_upgrade_details = check_building(entity, {
+  local result, info, modules_plan, removal_plan, module_upgrade_details, _, equipment_plan = check_building(entity, {
     dry_run = true,
     reservations = job.reservations,
     logistic_network = job.logistic_network
   })
   if result == "upgrade" or result == "fill" then
-    if try_defer_quality_upgrade(entity, job.surface_name, modules_plan, removal_plan, info, job.reservations, true, job.logistic_network, job.supply_planet_name) then
+    -- Grid entities never take the order_upgrade path: replacing the entity
+    -- would lose its equipment grid contents.
+    if not entity_has_grid(entity)
+      and try_defer_quality_upgrade(entity, job.surface_name, modules_plan, removal_plan, info, job.reservations, true, job.logistic_network, job.supply_planet_name) then
       job.queued = job.queued + 1
       return
     end
@@ -974,6 +986,7 @@ local function queue_entity_from_scan(job, entity)
       removal_plan = removal_plan,
       info = info,
       module_upgrades = module_upgrade_details,
+      equipment_plan = equipment_plan,
       platform_supply_required = job.is_space_platform,
       supply_planet_name = job.supply_planet_name
     })
@@ -1126,12 +1139,34 @@ local function refill_queue(surface_name)
 end
 
 -- Apply a pre-computed plan directly (no re-evaluation)
-local function apply_building_plan(entity, modules_plan, removal_plan, info)
+local function apply_building_plan(entity, modules_plan, removal_plan, info, equipment_plan)
   ensure_storage()
   if not entity.valid then return false, "invalid" end
   local has_modules = modules_plan and next(modules_plan)
   local has_removals = removal_plan and next(removal_plan)
-  if not has_modules and not has_removals then return false, "empty-plan" end
+
+  local applied_equipment = false
+  if equipment_plan and #equipment_plan > 0 and entity_has_grid(entity) then
+    local network = amu_get_entity_supply_network(entity)
+    if network then
+      local applied, details = amu_apply_equipment_plan(entity, entity.grid, equipment_plan, network)
+      if applied > 0 then
+        applied_equipment = true
+        amu_record_equipment_upgrades(entity.surface.name, details)
+      end
+    end
+  end
+
+  if not has_modules and not has_removals then
+    if applied_equipment then
+      amu_record_changed_building(entity)
+      if DEBUG then
+        game.print("[AutoModuleUpgrade] [APPLY] " .. entity.name .. " at " .. entity.position.x .. "," .. entity.position.y .. " — " .. (info or ""))
+      end
+      return true, nil
+    end
+    return false, "empty-plan"
+  end
 
   local valid_plan, invalid_reason = amu_validate_module_plan(entity, modules_plan, removal_plan)
   if not valid_plan then return false, invalid_reason end
@@ -1302,7 +1337,7 @@ function on_tick_handler()
         if entry.platform_supply_required and not platform_supply_available(entity.surface, entity.force, entry.supply_planet_name) then
           goto skip_apply
         end
-        local applied = apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info)
+        local applied = apply_building_plan(entity, entry.modules_plan, entry.removal_plan, entry.info, entry.equipment_plan)
         if not applied then goto skip_apply end
         sq.batch_upgraded = sq.batch_upgraded + 1
         if entry.module_upgrades then

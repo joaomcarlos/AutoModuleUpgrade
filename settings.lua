@@ -41,13 +41,20 @@ data:extend({
     order = "a[scan]-e[entities]",
   },
   {
+    type = "bool-setting",
+    name = "amu-scan-equipment",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "a[scan]-f[equipment]",
+  },
+  {
     type = "int-setting",
     name = "amu-queue-size-per-surface",
     setting_type = "runtime-global",
     minimum_value = 1,
     maximum_value = 500,
     default_value = 40,
-    order = "a[scan]-f[queue]",
+    order = "a[scan]-g[queue]",
   },
   {
     type = "bool-setting",

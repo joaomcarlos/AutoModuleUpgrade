@@ -6,18 +6,25 @@ local function build_scan_candidate_entity_lookups()
   scan_candidate_entity_names = {}
   scan_module_entity_name_set = {}
   scan_quality_entity_name_set = {}
+  scan_grid_entity_name_set = {}
 
   for name, proto in pairs(prototypes.entity) do
     local has_module_slots = (proto.module_inventory_size and proto.module_inventory_size > 0)
       or proto.quality_affects_module_slots == true
     local can_quality_upgrade = amu_can_quality_upgrade_prototype(proto)
-    if has_module_slots or can_quality_upgrade then
+    -- Characters carry their grid in the worn armor stack, not on the entity;
+    -- player armor is handled by the player equipment sweep instead.
+    local has_grid = proto.grid_prototype ~= nil and proto.type ~= "character"
+    if has_module_slots or can_quality_upgrade or has_grid then
       table.insert(scan_candidate_entity_names, name)
       if has_module_slots then
         scan_module_entity_name_set[name] = true
       end
       if can_quality_upgrade then
         scan_quality_entity_name_set[name] = true
+      end
+      if has_grid then
+        scan_grid_entity_name_set[name] = true
       end
     end
   end
@@ -99,6 +106,7 @@ function build_module_lookups()
   end
   sort_module_candidates()
   build_scan_candidate_entity_lookups()
+  if build_equipment_lookups then build_equipment_lookups() end
 end
 
 -- Helpers for tracking network reservations during a scan

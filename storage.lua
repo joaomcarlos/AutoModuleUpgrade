@@ -6,6 +6,7 @@ function ensure_storage()
   if not storage.surface_modules_placed then storage.surface_modules_placed = {} end
   if not storage.surface_building_upgrades then storage.surface_building_upgrades = {} end
   if not storage.surface_module_upgrades then storage.surface_module_upgrades = {} end
+  if not storage.surface_equipment_upgrades then storage.surface_equipment_upgrades = {} end
   if not storage.surface_last_upgraded then storage.surface_last_upgraded = {} end
   if not storage.surface_changed_buildings then storage.surface_changed_buildings = {} end
   if not storage.amu_change_highlight_objects then storage.amu_change_highlight_objects = {} end

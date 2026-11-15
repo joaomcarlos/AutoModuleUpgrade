@@ -792,13 +792,16 @@ function update_scan_window(player)
       mods_cell.caption = tostring(total)
       -- Tooltip: show module upgrade breakdown sorted by count desc
       local m_upgs = storage.surface_module_upgrades[surface_name]
-      if m_upgs and next(m_upgs) then
+      local e_upgs = storage.surface_equipment_upgrades and storage.surface_equipment_upgrades[surface_name]
+      if (m_upgs and next(m_upgs)) or (e_upgs and next(e_upgs)) then
         local items = {}
-        for key, c in pairs(m_upgs) do
+        for _, upgs in ipairs({m_upgs, e_upgs}) do
+        for key, c in pairs(upgs or {}) do
           local old_name, old_q, new_name, new_q = key:match("(.+)|(.+)|(.+)|(.+)")
           local pretty_old = old_name and (old_name:gsub("-", " "):gsub("^%l", string.upper)) or "?"
           local pretty_new = new_name and (new_name:gsub("-", " "):gsub("^%l", string.upper)) or "?"
           table.insert(items, {count = c, text = c .. "x " .. pretty_old .. " " .. (old_q or "?") .. "->" .. pretty_new .. " " .. (new_q or "?")})
+        end
         end
         table.sort(items, function(a, b) return a.count > b.count end)
         local lines = {}

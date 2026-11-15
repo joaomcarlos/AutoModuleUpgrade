@@ -2,7 +2,7 @@
 -- Building Evaluation & Proxy Management
 -- ============================================================
 
-local function get_entity_supply_network(entity, context)
+function amu_get_entity_supply_network(entity, context)
   if context and context.logistic_network ~= nil then
     return context.logistic_network
   end
@@ -73,7 +73,7 @@ function check_building(entity, context)
   if not entity.valid then return "skip", "invalid" end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" or entity.to_be_deconstructed() or entity.to_be_upgraded() then return "skip", "ghost/decon/upgrade" end
   if entity.item_request_proxy and entity.item_request_proxy.valid then return "skip", "existing proxy" end
-  local logistic_network = get_entity_supply_network(entity, context)
+  local logistic_network = amu_get_entity_supply_network(entity, context)
   if not logistic_network then return "none", "no logistic network" end
 
   local reservations = context and context.reservations or nil
@@ -231,8 +231,25 @@ function check_building(entity, context)
     end
   end
 
+  -- Phase C: Equipment grid upgrades (vehicles; player armor is swept separately).
+  -- The platform hub pool is a read-only table, so equipment swaps only run
+  -- against a real LuaLogisticNetwork.
+  local entity_grid = nil
+  local equipment_plan = nil
+  local equipment_info = nil
+  if amu_scan_equipment_enabled and amu_scan_equipment_enabled() then
+    local ok_grid, grid = pcall(function() return entity.grid end)
+    if ok_grid then entity_grid = grid end
+  end
+  if entity_grid and type(logistic_network) ~= "table" then
+    equipment_plan, equipment_info = amu_evaluate_equipment_grid(entity_grid, logistic_network, reservations)
+    if equipment_plan then did_anything = true end
+  end
   if not did_anything then
-    -- No module work; check if the building itself can receive a quality upgrade
+    -- No module work; check if the building itself can receive a quality upgrade.
+    -- Entities with equipment grids are excluded: order_upgrade replaces the
+    -- entity and would lose the grid contents.
+    if entity_grid then return "none", "no upgrade or fill available", nil, nil, nil end
     local target_quality = get_next_building_quality(entity)
     local upgrade_item_name = amu_get_entity_upgrade_item_name(entity)
     if target_quality and upgrade_item_name and network_has_items(logistic_network, upgrade_item_name, target_quality, 1, reservations) then
@@ -258,21 +275,31 @@ function check_building(entity, context)
     end
     if #fill_details > 0 then table.insert(parts, "fill: " .. table.concat(fill_details, ", ")) end
     if #optimisation_details > 0 then table.insert(parts, "optimise: " .. table.concat(optimisation_details, ", ")) end
+    if equipment_info then table.insert(parts, equipment_info) end
     local info_str = table.concat(parts, "; ")
 
     -- Create combined proxy if anything was done (skipped in dry_run mode)
     if not (context and context.dry_run) then
-      local valid_plan = amu_validate_module_plan(entity, modules_plan, removal_plan)
-      if not valid_plan then return "skip", "plan changed before apply" end
-      local proxy = entity.surface.create_entity{
-        name = "item-request-proxy",
-        target = entity,
-        position = entity.position,
-        force = entity.force,
-        modules = modules_plan,
-        removal_plan = removal_plan
-      }
-      if not proxy then return "skip", "proxy creation failed" end
+      local has_module_work = (#modules_plan > 0 or #removal_plan > 0)
+      if has_module_work then
+        local valid_plan = amu_validate_module_plan(entity, modules_plan, removal_plan)
+        if not valid_plan then return "skip", "plan changed before apply" end
+        local proxy = entity.surface.create_entity{
+          name = "item-request-proxy",
+          target = entity,
+          position = entity.position,
+          force = entity.force,
+          modules = modules_plan,
+          removal_plan = removal_plan
+        }
+        if not proxy then return "skip", "proxy creation failed" end
+      end
+      if equipment_plan then
+        local applied, details = amu_apply_equipment_plan(entity, entity_grid, equipment_plan, logistic_network)
+        if applied > 0 and amu_record_equipment_upgrades then
+          amu_record_equipment_upgrades(entity.surface.name, details)
+        end
+      end
       if amu_record_changed_building then
         amu_record_changed_building(entity)
       end
@@ -294,7 +321,7 @@ function check_building(entity, context)
       end
     end
 
-    return "upgrade", info_str, modules_plan, removal_plan, module_upgrade_details, recommendation
+    return "upgrade", info_str, modules_plan, removal_plan, module_upgrade_details, recommendation, equipment_plan
   end
 
   return "none", "no upgrade or fill available", nil, nil, nil
@@ -306,7 +333,7 @@ function try_defer_quality_upgrade(entity, surface_name, modules_plan, removal_p
   local target_quality = get_next_building_quality(entity)
   if not target_quality then return false end
   if entity.to_be_upgraded() then return false end
-  local logistic_network = supply_network or get_entity_supply_network(entity)
+  local logistic_network = supply_network or amu_get_entity_supply_network(entity)
   local upgrade_item_name = amu_get_entity_upgrade_item_name(entity)
   if not upgrade_item_name or not network_has_items(logistic_network, upgrade_item_name, target_quality, 1, reservations) then
     return false end
